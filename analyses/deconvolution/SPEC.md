@@ -29,13 +29,14 @@ It has two entry points that share functions under `R/`:
 - References combined from several sources with different labelling schemes.
 - MuSiC behaviour with few reference samples, which is deferred until MuSiC is added.
 
-**Prior art:** `claude-science/ccdi-exploration/tall/scripts/31_deconvolve.R` and `30_build_inputs.py`; methods notes in `tall/methods_notes/deconvolution.md`; AML pilot in `pilot/pilot_report.md`. These are mirrored in spirit, not copied: the tool is general, R-only, and has no T-ALL-specific reference ladder.
+**Prior art** (a local, uncommitted project, not in this repo): `claude-science/ccdi-exploration/tall/scripts/31_deconvolve.R` and `30_build_inputs.py`; methods notes in `tall/methods_notes/deconvolution.md`; AML pilot in `pilot/pilot_report.md`. These are mirrored in spirit, not copied: the tool is general, R-only, and has no T-ALL-specific reference ladder.
 
 ## 2. Environment
 
 - **R 4.6.2, Bioconductor 3.23**, managed by renv. The pins are in `renv.lock` and `renv/settings.json`.
+- **Re-check before building on these pins.** Every package check in planning ran on **R 4.5.3 / Bioconductor 3.22**: the InstaPrism 0.1.6 build and synthetic checks, anndataR 1.0.2, and the rhdf5 `raw/X` recipe. None was repeated on R 4.6.2 / Bioc 3.23, where anndataR is 1.2.3. The first implementation step is to `renv::install()` the packages below on R 4.6.2 and re-run those checks. The lockfile's R and Bioconductor versions were set by hand; renv has not yet been bootstrapped or snapshotted under R 4.6.2.
 - **InstaPrism**:
-  - Install from GitHub, `humengying0907/InstaPrism`, pinned at v0.1.6, commit `7d3b57cde9`. It is not on CRAN or Bioconductor.
+  - Install from GitHub, `humengying0907/InstaPrism`, pinned at v0.1.6, commit `7d3b57cde9`. It is not on CRAN or Bioconductor 3.23 (checked 2026-11-16).
   - Install **Biobase** from Bioconductor first: InstaPrism's `NAMESPACE` imports it, but its `DESCRIPTION` leaves it out.
   - **Attach it with `library(InstaPrism)`.** Calling `InstaPrism::refPrepare()` without attaching fails on `%>%`.
 - **Other packages**:
@@ -44,6 +45,7 @@ It has two entry points that share functions under `R/`:
   - nnls, optparse, jsonlite, ggplot2, rmarkdown, knitr.
 - **System**: pandoc, for the report.
 - **Not used**: zellkonverter, Quarto.
+- **Code formatting**: all R code in the module is formatted with **[Air](https://posit-dev.github.io/air/)**, Posit's R formatter (`air format analyses/deconvolution`). This includes the scripts, `R/` files, `scripts/`, and the R chunks in `templates/run_report.Rmd`, as far as Air supports them.
 
 ## 3. File layout
 
@@ -52,11 +54,11 @@ analyses/deconvolution/
 ├── build_reference.R
 ├── deconvolve.R
 ├── R/
-│   ├── read_inputs.R      # SCE/h5ad reading (anndataR + rhdf5), bulk reading, gene ID detection
-│   ├── reference.R        # per-library summing, cell subsample, state collapse, --min-cells
-│   ├── genes.R            # gene intersection, gene category exclusion, select_markers()
-│   ├── methods.R          # run_<method>() functions and the method registry
-│   └── report.R           # run report rendering and figure functions
+│   ├── read_inputs.R                 # SCE/h5ad reading (anndataR + rhdf5), bulk reading, gene ID detection
+│   ├── reference_profiles.R          # per-library summing, cell subsample, state collapse, --min-cells
+│   ├── gene_selection.R              # gene intersection, gene category exclusion, select_markers()
+│   ├── deconvolution_methods.R       # run_<method>() functions and the method registry
+│   └── run_report.R                  # run report rendering and figure functions
 ├── templates/run_report.Rmd
 ├── reference-files/gene_categories.tsv
 ├── scripts/make_gene_categories.R   # one-off generator for the gene category table
@@ -89,10 +91,32 @@ Both scripts `source()` the files in `R/`. Outputs go only to a user-chosen dire
   - Genes are keyed by Ensembl ID (rownames), with `rowData$gene_ids` and `rowData$gene_symbol`. Many symbols are `NA` or duplicated, so the Ensembl ID is the primary key.
   - In ScPCA files, `sample_id`/`library_id` are **not** in `colData`. They are in `metadata(sce)` (and `metadata(sce)$sample_metadata`), and the reader copies them onto the cells.
 - **`.h5ad`**:
-  - Read cell metadata (`obs`) and gene metadata with **anndataR**.
-  - Read raw counts from `raw/X` with **rhdf5**. In ScPCA processed files, `X` holds logcounts and raw counts exist only in `raw/X` (sparse CSC, cells × genes). Gene metadata is in `raw/var`: index = Ensembl ID, `gene_symbol` is categorical, and code −1 means `NA`.
+  - Read cell metadata (`obs`) with **anndataR**.
+  - Read raw counts from `raw/X` **and gene metadata from `raw/var`** with **rhdf5**. Genes must come from `raw/var`, not from anndataR's `var`, because `var` can differ from `raw/var` in non-ScPCA files. Check that the matrix dimensions match `raw/var` and `obs`.
+  - In ScPCA processed files, `X` holds logcounts and raw counts exist only in `raw/X` (sparse CSC, cells × genes). In `raw/var`, the index is the Ensembl ID, `gene_symbol` is categorical, and code −1 means `NA`.
   - anndataR silently drops `.raw` in every released version as of 2026-11 (scverse/anndataR#259). If a later version supports `.raw`, rhdf5 can be retired.
-  - **If the file has no `raw/X`**, read everything, including counts from `X`, with anndataR.
+  - **If the file has no `raw/X`**, read everything, including counts from `X` and genes from `var`, with anndataR.
+  - The `raw/X` recipe below was tested on R 4.5.3 with one ScPCA file:
+
+    ```r
+    a <- rhdf5::h5readAttributes(f, "raw/X")
+    shp <- as.integer(a$shape) # (n_cells, n_genes)
+    dat <- rhdf5::h5read(f, "raw/X/data")
+    ind <- rhdf5::h5read(f, "raw/X/indices")
+    ptr <- rhdf5::h5read(f, "raw/X/indptr")
+    genes <- as.character(rhdf5::h5read(f, "raw/var/_index"))
+    cells <- as.character(rhdf5::h5read(f, "obs/_index"))
+    stopifnot(a[["encoding-type"]] == "csc_matrix") # csc of cells x genes == genes x cells, ptr over genes
+    counts <- Matrix::sparseMatrix(
+      i = rep(seq_len(shp[2]), diff(ptr)),
+      j = ind + 1L,
+      x = as.numeric(dat),
+      dims = c(shp[2], shp[1]),
+      dimnames = list(genes, cells)
+    ) # genes x cells
+    # csr_matrix branch: i = ind + 1L, j = rep(seq_len(shp[1]), diff(ptr)) (ptr over cells)
+    # categoricals (obs labels, raw/var/gene_symbol): code -1 means NA
+    ```
 - **In every case, check that counts are integers**, and fail with a clear message otherwise. This catches normalised `X`.
 
 ### Reference samples
@@ -148,8 +172,8 @@ Pooled profiles per cell type or cell state are not stored. `deconvolve.R` compu
 | `--reference` | required | Reference `.rds` from `build_reference.R` |
 | `--bulk` | required | Genes × bulk samples count matrix: `.tsv`, `.csv` (first column = gene ID) or `.rds` (matrix/data.frame with gene rownames). The delimiter is taken from the extension |
 | `--output-dir` | required | Where outputs are written |
-| `--output-prefix` | `<bulk base name>_<reference name>` | Prefix for all output files |
-| `--methods` | `instaprism` | Comma-separated: `instaprism`, `nnls` (others once added) |
+| `--output-prefix` | `<bulk base name>_<reference name>_<method>` | Prefix for all output files |
+| `--method` | `instaprism` | **One method per run**: `instaprism` or `nnls` (others once added). Comparing methods means separate runs |
 | `--use-cell-states` / `--no-cell-states` | on if the reference has states | Off collapses cell states to cell types before fitting |
 | `--min-cells` | `10` | Cell states/types with fewer cells are dropped, with a warning |
 | `--malignant-cell-type` | none | Names the **malignant cell type**; turns on the InstaPrism reference update |
@@ -158,10 +182,10 @@ Pooled profiles per cell type or cell state are not stored. `deconvolve.R` compu
 | `--exclude-gene-categories` | `mitochondrial,ribosomal,sex` | Categories from the gene category table to exclude; `none` disables |
 | `--gene-categories` | `reference-files/gene_categories.tsv` | Gene category table to use |
 | `--min-gene-overlap` | `0.5` | Fail if fewer than this fraction of bulk genes match the reference |
-| `--n-markers` | `60` | Markers per label for methods that need markers |
+| `--n-markers` | `60` | Markers per label, for methods that need markers |
 | `--n-cores` | `1` | Passed to InstaPrism (`n.core`); does not change results |
 | `--seed` | `2026` | |
-| `--save-method-objects` | off | Also write each method's raw result object |
+| `--save-method-objects` | off | Also write the method's raw result object |
 | `--no-report` | off | Skip the HTML report |
 | `--save-figures` | off | Also write each report figure as a separate file |
 | `--figure-format` | `png` | `png` or `pdf` |
@@ -184,14 +208,15 @@ Options for one method only are explicit options named with that method's prefix
 - Apply `--min-cells` to the pooled labels, after any collapsing. Dropped labels produce a warning at either level, never an error.
 
 **4. Harmonise genes.**
-- Match bulk IDs against the reference's `gene_id` (Ensembl) or `gene_symbol`, according to the detected bulk ID type. Duplicate reference symbols are summed, with a warning.
+- Match bulk IDs against the reference's `gene_id` (Ensembl) or `gene_symbol`, according to the detected bulk ID type.
+- When matching by symbol, **drop reference genes with an `NA` symbol** (about 20,000 in ScPCA), then sum duplicate reference symbols, with a warning.
 - Intersect reference and bulk genes, and report how many genes were lost.
 - Fail if the matched fraction of bulk genes is below `--min-gene-overlap`.
 - No other filtering happens here.
 
-**5. Exclude gene categories** (§8). This runs after intersection and before InstaPrism's `filter`, and applies to every method, including marker selection.
+**5. Exclude gene categories** (§8). This runs after intersection and before InstaPrism's `filter`, and applies whatever the method, including to marker selection.
 
-**6. Run each requested method** (§7) on the same gene set and bulk matrix.
+**6. Run the chosen method** (§7). Only one method runs per call to `deconvolve.R`. InstaPrism with the reference update reports two fits from that one method: `instaprism` and `instaprism_updated`.
 
 **InstaPrism:**
 - **Build the reference** with the exported `refPrepare(sc_Expr = summed counts per cell state, cell.type.labels, cell.state.labels)`. It accepts summed counts, so per-cell data isn't needed. Don't use internal (`:::`) functions.
@@ -201,8 +226,9 @@ Options for one method only are explicit options named with that method's prefix
 - **Reference update** (only with `--malignant-cell-type`): `InstaPrism_update(obj, bulk_Expr, key = <malignant cell type>, cell.types.to.update = "all"` for `--update-mode all`, or `NULL` for `malignant`).
   - **What it does:** the malignant profile is re-estimated **separately for each bulk sample**. In `all` mode, each normal cell type's profile is also re-estimated **once, pooled over every bulk sample in the initial call**, weighted by sequencing depth.
   - **What it reports:** method `instaprism_updated`.
-    - `all` mode: cell-type level only, from `merge_updated_theta()`.
-    - `malignant` mode: normal cell types keep their cell-state rows, and the malignant cell type collapses to one row.
+    - **Cell-type level, in both modes:** complete, from `merge_updated_theta()`.
+    - **Cell-state level, `malignant` mode only:** rows for the normal cell types only. The malignant cell type has no updated cell-state breakdown, so these rows are partial and don't sum to 1.
+    - `all` mode has no cell-state rows.
   - Updated cell types lose their cell-state proportions, so cell-state proportions for updated types come from the initial fit.
   - **Pass the identical bulk matrix**, same columns in the same order, to both calls. The update matches bulk samples **by column position**, so a reordered or subset matrix runs silently with wrong results.
   - **Look up `@theta` rows by name, not position.** The malignant cell type comes first, and levels are mixed.
@@ -219,7 +245,7 @@ Options for one method only are explicit options named with that method's prefix
 ## 7. Method interface
 
 - **Signature:** `run_<method>(reference, bulk, options)`. It returns a data frame with columns `method, level, label, sample_id, quantity, proportion`; `deconvolve.R` adds `reference`.
-- **Registry:** a method registry in `R/methods.R` declares, for each method:
+- **Registry:** a method registry in `R/deconvolution_methods.R` declares, for each method:
   - its option names and defaults;
   - the `quantity` it estimates (`mrna_share` or `cell_share`);
   - whether it needs markers or the cell subsample;
@@ -257,10 +283,10 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 
 | File | Contents |
 |---|---|
-| `<prefix>_proportions.tsv` | Long table: `method, reference, level, label, sample_id, quantity, proportion`. `level` is `cell_type` or `cell_state`; `quantity` is `mrna_share` or `cell_share`. Proportions sum to 1 per method × level × bulk sample. |
+| `<prefix>_proportions.tsv` | Long table: `method, reference, level, label, sample_id, quantity, proportion`. `level` is `cell_type` or `cell_state`; `quantity` is `mrna_share` or `cell_share`. Proportions sum to 1 per method × level × bulk sample, except `instaprism_updated` cell-state rows in `malignant` mode, which cover only the normal cell types (§6, step 6). |
 | `<prefix>_run_info.json` | Parameters, detected gene ID type, gene funnel counts and genes removed (per category and by InstaPrism's filter), reference summary (cells/reference samples per label, dropped labels), warnings, bulk sample list, batch-dependent settings in effect, per-step runtimes, package versions. The report is rendered from this file plus the TSV, so it can be re-rendered without re-fitting. |
 | `<prefix>_report.html` | Run report (§10); skipped with `--no-report`. |
-| `<prefix>_<method>.rds` | Raw method result objects; only with `--save-method-objects`. |
+| `<prefix>_<method>.rds` | Raw method result object; only with `--save-method-objects`. |
 | `<prefix>_figures/` | Each report figure as a separate file, named by its report chunk label (e.g. `proportions_instaprism.png`). Only with `--save-figures`; `--figure-format png` or `pdf`. Made by the same plotting functions as the report. |
 
 ## 10. Run report
@@ -268,7 +294,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 **Rendering:**
 - R Markdown (`templates/run_report.Rmd`), rendered by `deconvolve.R` with `rmarkdown::render()` into **one self-contained HTML file**.
 - Use **Quarto-style `#|` chunk options and labels** where possible, to ease a later move to Quarto.
-- **Tabbed layout:** methods and plot types are tabs within each section.
+- **Tabbed layout:** fits (`instaprism` / `instaprism_updated`) and plot types are tabs within each section.
 
 **Sections, in order:**
 
@@ -277,7 +303,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - reference name;
    - number of cell states and cell types;
    - genes used, out of the genes in the bulk matrix;
-   - methods;
+   - method (and whether the reference update ran);
    - number of warnings.
 2. **Warnings**, each with its severity and source:
    - labels dropped by `--min-cells`;
@@ -287,12 +313,12 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - **small bulk sets** (fewer than ~10 bulk samples), where InstaPrism's `filter` lets a single sample decide which genes are dropped.
 3. **Batch-dependent settings** active in this run (`--update-mode all`, `--instaprism-filter`), with a one-line reason each and a link to the bulk sample list.
 4. **Proportions**:
-   - stacked bars per bulk sample for each method, samples ordered by InstaPrism malignant proportion (or by the largest cell type when there's no malignant cell type), one fixed colour per cell type across all plots;
-   - cell-state composition within each cell type that has more than one state (InstaPrism initial fit);
+   - stacked bars per bulk sample for each fit, samples ordered by the malignant proportion (InstaPrism initial fit when there is one), or by the largest cell type when no malignant cell type is named, one fixed colour per cell type across all plots;
+   - cell-state composition within each cell type that has more than one state, only for methods that report cell states (InstaPrism initial fit);
    - a heatmap.
    - **Above ~60 bulk samples**, drop per-sample labels and use sorted stacks without labels. Keep the heatmap; per-sample values are in the TSV.
-5. **Method comparison**, shown **only when two or more methods ran**:
-   - each method against the InstaPrism initial fit;
+5. **Fit comparison**, shown **only when the InstaPrism reference update ran** (one method per run, so there is no cross-method comparison):
+   - updated fit against the initial fit;
    - distributions by cell type;
    - a table of mean proportions.
 6. **Inputs**:
@@ -303,14 +329,14 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - a reference table of cells and reference samples per cell type/state, with dropped labels marked.
 7. **Run details**:
    - parameters;
-   - a runtime graph (**only when the method-comparison section is shown**);
+   - a runtime graph (**only when the fit-comparison section is shown**; otherwise total runtime as text);
    - a collapsible bulk sample list;
    - versions;
    - output paths.
 
 **For implementation:** give the cell-state plot a legend per cell type, rather than one shared legend, so it stays readable when there are many states.
 
-A prototype report on synthetic data is on local branch `claude/prototype/run-report` (`analyses/deconvolution/prototype-run-report/`).
+A prototype report on synthetic data is on branch `claude/prototype/run-report` (`analyses/deconvolution/prototype-run-report/`). The branch exists only on the planner's machine and is not pushed.
 
 ## 11. Behaviour notes
 
@@ -318,7 +344,7 @@ A prototype report on synthetic data is on local branch `claude/prototype/run-re
 - **`--update-mode all`:** the normal cell-type profiles are pooled across the run. In claude-science's T-ALL run, the same reference gave pseudobulk RMSE 0.022 as one 225-sample call versus 0.048 in per-patient calls.
 - **InstaPrism's `filter`:** it drops genes above 1% of reads in more than 10% of the run's bulk samples. Estimates shifted by up to about 0.017 between batch compositions.
 
-Only `--update-mode malignant` together with `--no-instaprism-filter` gives estimates for each sample that don't depend on the rest of the run.
+With `--no-instaprism-filter`, the initial InstaPrism fit and the `malignant`-mode update both give estimates for each sample that don't depend on the rest of the run. The `all`-mode update always depends on the run.
 
 **Choosing an update mode.** In the AML pilot:
 - `malignant` mode fit high-blast samples better: real-bulk diagnosis RMSE 0.028 versus 0.073 for `all`.
@@ -328,7 +354,7 @@ The default is `all`. The final default is left to benchmarking.
 
 ## 12. Decision record
 
-These decisions were made in a planning session on 2026-11-16. The supporting research is on these local branches:
+These decisions were made in a planning session on 2026-11-16. The supporting research is on these branches, which exist only on the planner's machine and are not pushed:
 - `claude/research/instaprism-api`: InstaPrism API and update semantics, with source-code citations and synthetic checks;
 - `claude/research/scpca-reference-reading`: ScPCA file formats, anndataR, and memory strategy;
 - `claude/research/fast-deconvolution-methods`: candidate methods and benchmark evidence.
