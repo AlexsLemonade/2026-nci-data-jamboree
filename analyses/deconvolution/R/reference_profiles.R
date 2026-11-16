@@ -1,4 +1,6 @@
-# Building a reference: summed raw counts per reference sample x cell state.
+# Building a reference (build_reference.R): summed raw counts per reference
+# sample x cell state; and preparing it at run time (deconvolve.R): loading,
+# validating, pooling per cell state and applying --min-cells.
 #
 # The reference is a SummarizedExperiment (see SPEC.md, "Reference object"):
 #   assay "counts"  sparse summed counts, genes x (reference sample x cell state)
@@ -435,4 +437,226 @@ package_versions <- function() {
     character(1)
   )
   c(R = as.character(getRversion()), versions)
+}
+
+# Preparing reference profiles at run time (deconvolve.R) ---------------------
+
+REFERENCE_COLDATA_COLUMNS <- c(
+  "sample_id",
+  "cell_type",
+  "cell_state",
+  "n_cells"
+)
+
+#' Load a reference .rds and check it is one this tool can use
+#'
+#' @param path Path to a reference written by build_reference.R.
+#' @return The reference SummarizedExperiment.
+load_reference <- function(path) {
+  if (!file.exists(path)) {
+    stop("Reference file not found: ", path)
+  }
+  reference <- readRDS(path)
+  validate_reference(reference, path)
+  reference
+}
+
+#' Stop with a clear message unless `reference` matches the reference format
+validate_reference <- function(reference, path) {
+  fail <- function(...) {
+    stop(
+      path,
+      " is not a usable deconvolution reference: ",
+      ...,
+      ". Build references with build_reference.R.",
+      call. = FALSE
+    )
+  }
+  if (!methods::is(reference, "SummarizedExperiment")) {
+    fail("expected a SummarizedExperiment, found ", class(reference)[1])
+  }
+  version <- S4Vectors::metadata(reference)$deconvolution_reference_version
+  if (is.null(version)) {
+    fail("no deconvolution_reference_version in metadata()")
+  }
+  if (!identical(as.integer(version), DECONVOLUTION_REFERENCE_VERSION)) {
+    fail(
+      "reference format version ",
+      version,
+      " is not supported (this tool reads version ",
+      DECONVOLUTION_REFERENCE_VERSION,
+      ")"
+    )
+  }
+  if (!"counts" %in% SummarizedExperiment::assayNames(reference)) {
+    fail("no 'counts' assay")
+  }
+  missing_col <- setdiff(
+    REFERENCE_COLDATA_COLUMNS,
+    names(SummarizedExperiment::colData(reference))
+  )
+  if (length(missing_col) > 0) {
+    fail("colData lacks column(s) ", paste(missing_col, collapse = ", "))
+  }
+  missing_row <- setdiff(
+    c("gene_id", "gene_symbol"),
+    names(SummarizedExperiment::rowData(reference))
+  )
+  if (length(missing_row) > 0) {
+    fail("rowData lacks column(s) ", paste(missing_row, collapse = ", "))
+  }
+  if (ncol(reference) == 0) {
+    fail("it has no reference columns")
+  }
+  invisible(reference)
+}
+
+#' Whether a reference has cell states distinct from its cell types
+has_cell_states <- function(reference) {
+  groups <- SummarizedExperiment::colData(reference)
+  any(groups$cell_state != groups$cell_type)
+}
+
+#' Pool reference columns into one profile per cell state, applying --min-cells
+#'
+#' Steps, in order: collapse cell states to cell types when `use_cell_states`
+#' is FALSE; pool across reference samples; drop cell types, then cell states,
+#' with fewer than `min_cells` cells, warning for each level. A cell type whose
+#' states are all dropped is dropped too. When states are off (or the
+#' reference has none) each cell type has one state named after it.
+#'
+#' @param reference A reference SummarizedExperiment (see load_reference()).
+#' @param use_cell_states Keep cell states (TRUE) or collapse them (FALSE).
+#' @param min_cells Minimum pooled cells per cell type and per cell state.
+#' @return A list with
+#'   `counts`: sparse summed counts, genes x cell states (columns named by
+#'     cell state), with the reference's gene IDs as row names;
+#'   `labels`: data.frame(cell_type, cell_state, n_cells, n_samples), one row
+#'     per column of `counts`;
+#'   `genes`: the reference rowData (gene_id, gene_symbol) as a data.frame;
+#'   `dropped`: data.frame(level, label, n_cells) of labels removed by
+#'     `min_cells`.
+prepare_profiles <- function(reference, use_cell_states, min_cells) {
+  groups <- as.data.frame(SummarizedExperiment::colData(reference))
+  counts <- SummarizedExperiment::assay(reference, "counts")
+  if (!use_cell_states) {
+    groups$cell_state <- groups$cell_type
+  }
+
+  key <- paste(groups$cell_type, groups$cell_state, sep = "\r")
+  label_keys <- unique(key)
+  indicator <- Matrix::sparseMatrix(
+    i = seq_along(key),
+    j = match(key, label_keys),
+    x = 1,
+    dims = c(length(key), length(label_keys))
+  )
+  first <- match(label_keys, key)
+  labels <- data.frame(
+    cell_type = groups$cell_type[first],
+    cell_state = groups$cell_state[first],
+    n_cells = as.integer(tapply(groups$n_cells, factor(key, label_keys), sum)),
+    n_samples = as.integer(tapply(
+      groups$sample_id,
+      factor(key, label_keys),
+      function(x) length(unique(x))
+    ))
+  )
+  pooled <- methods::as(counts %*% indicator, "CsparseMatrix")
+
+  kept <- apply_min_cells(labels, min_cells)
+  by_label <- order(labels$cell_type[kept$keep], labels$cell_state[kept$keep])
+  keep <- which(kept$keep)[by_label]
+
+  pooled <- pooled[, keep, drop = FALSE]
+  labels <- labels[keep, , drop = FALSE]
+  rownames(labels) <- NULL
+  dimnames(pooled) <- list(rownames(reference), labels$cell_state)
+
+  list(
+    counts = pooled,
+    labels = labels,
+    genes = as.data.frame(SummarizedExperiment::rowData(reference))[, c(
+      "gene_id",
+      "gene_symbol"
+    )],
+    dropped = kept$dropped
+  )
+}
+
+#' Decide which pooled labels pass --min-cells, warning about the rest
+#'
+#' @param labels data.frame(cell_type, cell_state, n_cells), one row per state.
+#' @return list(keep = logical per row, dropped = data.frame(level, label,
+#'   n_cells)).
+apply_min_cells <- function(labels, min_cells) {
+  type_cells <- tapply(labels$n_cells, labels$cell_type, sum)
+  small_types <- type_cells[type_cells < min_cells]
+  keep <- !labels$cell_type %in% names(small_types)
+
+  # states are checked separately only where they differ from their type
+  has_state <- labels$cell_state != labels$cell_type
+  small_state <- keep & has_state & labels$n_cells < min_cells
+  keep <- keep & !small_state
+
+  # a type that passed but lost every state is gone too
+  emptied <- setdiff(
+    unique(labels$cell_type[!labels$cell_type %in% names(small_types)]),
+    labels$cell_type[keep]
+  )
+
+  dropped <- rbind(
+    data.frame(
+      level = rep("cell_type", length(small_types)),
+      label = names(small_types),
+      n_cells = as.integer(small_types)
+    ),
+    data.frame(
+      level = rep("cell_state", sum(small_state)),
+      label = labels$cell_state[small_state],
+      n_cells = labels$n_cells[small_state]
+    ),
+    data.frame(
+      level = rep("cell_type", length(emptied)),
+      label = emptied,
+      n_cells = as.integer(type_cells[emptied])
+    )
+  )
+
+  if (length(small_types) > 0) {
+    warning(
+      "Dropping cell type(s) with fewer than ",
+      min_cells,
+      " cells (--min-cells): ",
+      paste0(names(small_types), " (", small_types, ")", collapse = ", "),
+      call. = FALSE
+    )
+  }
+  if (any(small_state)) {
+    warning(
+      "Dropping cell state(s) with fewer than ",
+      min_cells,
+      " cells (--min-cells): ",
+      paste0(
+        labels$cell_state[small_state],
+        " (",
+        labels$n_cells[small_state],
+        ")",
+        collapse = ", "
+      ),
+      call. = FALSE
+    )
+  }
+  if (length(emptied) > 0) {
+    warning(
+      "Cell type(s) left with no cell states after --min-cells, so dropped: ",
+      paste(emptied, collapse = ", "),
+      ". Consider --no-cell-states.",
+      call. = FALSE
+    )
+  }
+  if (!any(keep)) {
+    stop("No cell types left after applying --min-cells ", min_cells)
+  }
+  list(keep = keep, dropped = dropped)
 }

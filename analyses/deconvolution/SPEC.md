@@ -177,7 +177,7 @@ Pooled profiles per cell type or cell state are not stored. `deconvolve.R` compu
 | `--output-dir` | required | Where outputs are written |
 | `--output-prefix` | `<bulk base name>_<reference name>_<method>` | Prefix for all output files |
 | `--method` | `instaprism` | **One method per run**: `instaprism` or `nnls` (others once added). Comparing methods means separate runs |
-| `--use-cell-states` / `--no-cell-states` | on if the reference has states | Off collapses cell states to cell types before fitting |
+| `--use-cell-states` / `--no-cell-states` | on if the reference has states and the method reports cell states | Off collapses cell states to cell types before fitting. Always off for methods that fit only at cell-type level (§7) |
 | `--min-cells` | `10` | Cell states/types with fewer cells are dropped, with a warning |
 | `--malignant-cell-type` | none | Names the **malignant cell type**; turns on the InstaPrism reference update |
 | `--update-mode` | `all` | `all` or `malignant` (see §6, step 6) |
@@ -206,7 +206,7 @@ Options for one method only are explicit options named with that method's prefix
 - **Non-integer values** (e.g. salmon estimated counts) are rounded, with a warning.
 
 **3. Prepare reference profiles.**
-- If cell states are off, collapse each cell type's states into one state named after the type.
+- If cell states are off, collapse each cell type's states into one state named after the type. Cell states are always off for methods that fit only at cell-type level (NNLS, and later MuSiC, DWLS, dtangle), so `--min-cells` is never applied to states those methods don't use. Passing `--use-cell-states` with such a method gives a warning and is ignored.
 - Pool columns across reference samples, giving one summed count profile per cell state (and per cell type).
 - Apply `--min-cells` to the pooled labels, after any collapsing. Dropped labels produce a warning at either level, never an error.
 
@@ -253,7 +253,7 @@ Options for one method only are explicit options named with that method's prefix
   - the `quantity` it estimates (`mrna_share` or `cell_share`);
   - whether it needs markers or the cell subsample;
   - which levels it reports.
-- **Methods without states** (NNLS, and later MuSiC, DWLS, dtangle) always fit at `cell_type` level. Cell-state proportions come only from hierarchy-aware methods (InstaPrism).
+- **Methods without states** (NNLS, and later MuSiC, DWLS, dtangle) always fit at `cell_type` level, and their reference profiles are prepared with cell states collapsed (§6, step 3). Cell-state proportions come only from hierarchy-aware methods (InstaPrism).
 - **Notes for later methods:**
   - MuSiC and cellGeometry would use `metadata(se)$cell_subsample`.
   - MuSiC estimates `cell_share`.
