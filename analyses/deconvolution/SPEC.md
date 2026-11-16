@@ -247,7 +247,7 @@ Options for one method only are explicit options named with that method's prefix
 
 ## 7. Method interface
 
-- **Signature:** `run_<method>(reference, bulk, options)`. It returns a data frame with columns `method, level, label, sample_id, quantity, proportion`; `deconvolve.R` adds `reference`.
+- **Signature:** `run_<method>(reference, bulk, options)`. It returns a list: `proportions`, a data frame with columns `method, level, label, sample_id, quantity, proportion` (`deconvolve.R` adds `reference`); `info`, method details for run info (e.g. genes removed by InstaPrism's `filter`); and `object`, the raw result for `--save-method-objects`.
 - **Registry:** a method registry in `R/deconvolution_methods.R` declares, for each method:
   - its option names and defaults;
   - the `quantity` it estimates (`mrna_share` or `cell_share`);
