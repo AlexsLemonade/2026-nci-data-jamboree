@@ -305,3 +305,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Claude temp files
+.claude/worktrees/
