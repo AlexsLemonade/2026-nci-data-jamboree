@@ -288,7 +288,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 | File | Contents |
 |---|---|
 | `<prefix>_proportions.tsv` | Long table: `method, reference, level, label, sample_id, quantity, proportion`. `level` is `cell_type` or `cell_state`; `quantity` is `mrna_share` or `cell_share`. Proportions sum to 1 per method × level × bulk sample, except `instaprism_update_malignant` cell-state rows, which cover only the normal cell types (§6, step 6). |
-| `<prefix>_run_info.json` | Parameters, detected gene ID type, gene funnel counts and genes removed (per category and by InstaPrism's filter), reference summary (cells/reference samples per label, dropped labels), warnings, bulk sample list, batch-dependent settings in effect, per-step runtimes, and session info from `sessioninfo` (platform and loaded packages). Every path in run info, including parameters, outputs and paths inside warnings, is shown relative to the module when it is inside it, and with the home directory as `~` otherwise. The report is rendered from this file plus the TSV, so it can be re-rendered without re-fitting. |
+| `<prefix>_run_info.json` | Parameters, detected gene ID type, gene funnel counts and genes removed (per category and by InstaPrism's filter), reference summary (cells/reference samples per label, dropped labels), warnings (each with the step that raised it), bulk sample list, batch-dependent settings in effect, per-step runtimes, and session info from `sessioninfo` (platform and loaded packages). Every path in run info, including parameters, outputs and paths inside warnings, is shown relative to the module when it is inside it, and with the home directory as `~` otherwise. The report is rendered from this file plus the TSV, so it can be re-rendered without re-fitting. |
 | `<prefix>_report.html` | Run report (§10); skipped with `--no-report`. |
 | `<prefix>_<method>.rds` | Raw method result object; only with `--save-method-objects`. |
 | `<prefix>_figures/` | Each report figure as a separate file, named by its report chunk label (e.g. `proportions_instaprism.png`). Only with `--save-figures`; `--figure-format png` or `pdf`. Made by the same plotting functions as the report. |
@@ -309,7 +309,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - genes used, out of the genes in the bulk matrix;
    - method (and whether the reference update ran);
    - number of warnings.
-2. **Warnings**, each with its severity and source:
+2. **Warnings**, each with the pipeline step that raised it, for example:
    - labels dropped by `--min-cells`;
    - rounding;
    - duplicate IDs;
@@ -326,7 +326,8 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - distributions by cell type;
    - a table of mean proportions.
 6. **Inputs**:
-   - a gene funnel: bulk → shared → after gene category exclusion → after InstaPrism filter;
+   - a gene funnel: bulk → shared → after gene category exclusion → used by the method (after InstaPrism's filter, for InstaPrism);
+   - the number of marker genes, for methods that use markers;
    - the detected ID type;
    - genes removed per category;
    - a collapsible list of genes removed by InstaPrism's filter;
