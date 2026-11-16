@@ -181,11 +181,12 @@ run_instaprism <- function(reference, bulk, options) {
   used_genes <- rownames(fit@initial.scaler)
   info <- list(
     n_genes_used = length(used_genes),
-    genes_zero_in_reference = setdiff(rownames(ref_counts), reference_genes),
-    genes_removed_by_filter = setdiff(
+    # I() keeps gene lists as JSON arrays in run info, even with one gene
+    genes_zero_in_reference = I(setdiff(rownames(ref_counts), reference_genes)),
+    genes_removed_by_filter = I(setdiff(
       intersect(reference_genes, rownames(bulk)),
       used_genes
-    ),
+    )),
     filter = options$instaprism_filter,
     malignant_cell_type = malignant,
     update_mode = if (!is.null(malignant)) options$update_mode
