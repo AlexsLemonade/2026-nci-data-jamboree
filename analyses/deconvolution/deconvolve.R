@@ -427,7 +427,7 @@ run_pipeline <- function() {
     )
   )
   jsonlite::write_json(
-    run_info,
+    hide_paths_in(run_info),
     out("_run_info.json"),
     auto_unbox = TRUE,
     pretty = TRUE,
@@ -495,7 +495,7 @@ session_info_for_json <- function() {
   packages <- as.data.frame(si$packages)
   list(
     platform = lapply(unclass(si$platform), function(x) {
-      hide_home(as.character(x))
+      hide_paths(as.character(x))
     }),
     packages = data.frame(
       package = packages$package,
@@ -503,7 +503,7 @@ session_info_for_json <- function() {
       attached = packages$attached,
       date = packages$date,
       source = packages$source,
-      library = relative_to_module(package_library(packages$package))
+      library = hide_paths(package_library(packages$package))
     )
   )
 }
@@ -525,14 +525,30 @@ package_library <- function(packages) {
   )
 }
 
-#' Paths under the module directory as relative paths; others via hide_home()
-relative_to_module <- function(paths) {
-  prefix <- paste0(module_dir, "/")
-  ifelse(
-    startsWith(paths, prefix),
-    substring(paths, nchar(prefix) + 1),
-    hide_home(paths)
-  )
+#' Show paths in text relative to the module, and the home directory as `~`
+#'
+#' Paths under the module directory become relative to it (e.g.
+#' `reference-files/gene_categories.tsv`); any other path under the home
+#' directory starts with `~`. Works on paths anywhere in the text, such as
+#' inside warning messages.
+hide_paths <- function(text) {
+  text <- gsub(paste0(module_dir, "/"), "", text, fixed = TRUE)
+  hide_home(text)
+}
+
+#' Apply hide_paths() to every string in a nested list, keeping attributes
+#' (so I() vectors stay JSON arrays)
+hide_paths_in <- function(x) {
+  if (is.list(x)) {
+    x[] <- lapply(x, hide_paths_in)
+    x
+  } else if (is.character(x)) {
+    hidden <- hide_paths(x)
+    attributes(hidden) <- attributes(x)
+    hidden
+  } else {
+    x
+  }
 }
 
 #' Replace the home directory in text with `~`
