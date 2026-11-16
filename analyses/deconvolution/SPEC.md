@@ -61,7 +61,8 @@ analyses/deconvolution/
 │   └── run_report.R                  # run report rendering and figure functions
 ├── templates/run_report.Rmd
 ├── reference-files/gene_categories.tsv
-├── scripts/make_gene_categories.R   # one-off generator for the gene category table
+├── scripts/download_ensembl_gtf.sh  # downloads the Ensembl GTF to data/references/ (git-ignored)
+├── scripts/make_gene_categories.R   # one-off generator for the gene category table, using Bioc.gff
 └── README.md
 ```
 
@@ -267,12 +268,12 @@ Uses the claude-science rule. For each label at the fitted level, take the top `
 - **Your own table:** `--gene-categories` replaces the default table with a user's own, with any categories.
 - **Matching:** on Ensembl ID first, falling back to symbol when the bulk is keyed by symbol.
 
-**Default table:** `reference-files/gene_categories.tsv`. The committed script `scripts/make_gene_categories.R` generates it once from Ensembl 104 (GRCh38) annotation, the version ScPCA uses. It's needed because ScPCA gene metadata has no biotype or chromosome.
+**Default table:** `reference-files/gene_categories.tsv`. `scripts/download_ensembl_gtf.sh` downloads the Ensembl 104 (GRCh38) GTF, the annotation ScPCA uses, to `data/references/` at the repository root (git-ignored) and verifies its checksum. `scripts/make_gene_categories.R` then reads it with `Bioc.gff::readGFF()` and generates the table. It's needed because ScPCA gene metadata has no biotype or chromosome.
 
 | Category | Contents | Excluded by default |
 |---|---|---|
 | `mitochondrial` | `MT-` genes | yes |
-| `ribosomal` | RPS/RPL (incl. RP[SL]P-named), RPSA, mito-ribosomal MRPS/MRPL | yes |
+| `ribosomal` | protein-coding only: RPS/RPL (incl. RPLP0/1/2, RPSA, paralogs such as RPL10L) and mito-ribosomal MRPS/MRPL, matched by anchored names; excludes S6 kinases (RPS6K*), RPS19BP1, readthroughs; ribosomal pseudogenes and antisense transcripts fall under `non_coding` | yes |
 | `sex` | all chrY genes, plus XIST and TSIX | yes |
 | `hemoglobin` | HBA/HBB/HBD/HBG/HBE/HBZ/HBM/HBQ (not HBEGF) | no: erythroid is a real cell type here |
 | `non_coding` | Ensembl biotype other than `protein_coding` | no: opt-in, because it removes ~40k genes |
