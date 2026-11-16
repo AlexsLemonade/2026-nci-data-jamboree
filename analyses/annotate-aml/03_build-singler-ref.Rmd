@@ -6,6 +6,8 @@ output:
     toc_float: true
 author: "JN Taroni"
 date: 2026
+params:
+  holdout_study: ""
 ---
 
 ## Introduction
@@ -20,6 +22,17 @@ This notebook builds a SingleR reference from the age-filtered AML scAtlas subse
 - Counts are log-normalized with `scuttle::logNormCounts()` on all atlas genes; training is then
   restricted to genes present in every library of the ScPCA AML project (`SCPCP000007`).
 - The reference is trained with `trainSingleR(de.method = "wilcox", aggr.ref = TRUE)`.
+- Set the `holdout_study` parameter (e.g., `"mumme_2023"`) to leave one study out for
+  validation (step 4). Outputs then get a `_no-<study>` suffix, so the full reference isn't
+  overwritten. To render the held-out version:
+
+  ```r
+  rmarkdown::render(
+    "03_build-singler-ref.Rmd",
+    params = list(holdout_study = "mumme_2023"),
+    output_file = "03_build-singler-ref_no-mumme_2023.nb.html"
+  )
+  ```
 
 ## Setup
 
@@ -41,10 +54,20 @@ atlas_file <- fs::path(root_dir, "data", "AML-scAtlas", "AML_scAtlas_le29.h5ad")
 scpca_project <- "SCPCP000007" # ScPCA project made up primarily of AML samples
 scpca_dir <- fs::path(root_dir, "data", "scpca", scpca_project)
 
+# Optional held-out study for validation
+holdout_study <- params$holdout_study
+file_suffix <- if (nzchar(holdout_study)) paste0("_no-", holdout_study) else ""
+
 results_dir <- fs::path(module_dir, "results")
 fs::dir_create(results_dir)
-ref_sce_file <- fs::path(results_dir, "AML_scAtlas_le29_singler_ref_sce.rds")
-trained_ref_file <- fs::path(results_dir, "AML_scAtlas_le29_singler_trained_ref.rds")
+ref_sce_file <- fs::path(
+  results_dir,
+  paste0("AML_scAtlas_le29_singler_ref_sce", file_suffix, ".rds")
+)
+trained_ref_file <- fs::path(
+  results_dir,
+  paste0("AML_scAtlas_le29_singler_trained_ref", file_suffix, ".rds")
+)
 ```
 
 ## Genes shared with ScPCA
@@ -74,6 +97,17 @@ adata
 
 obs <- adata$obs
 obs$cell_id <- adata$obs_names
+```
+
+Remove the held-out study, if any.
+
+```{r holdout}
+if (nzchar(holdout_study)) {
+  stopifnot(holdout_study %in% obs$Study)
+  message("Holding out ", sum(obs$Study == holdout_study), " cells from ", holdout_study)
+  obs <- obs[obs$Study != holdout_study, ]
+}
+nrow(obs)
 ```
 
 How many atlas genes are present in ScPCA?
