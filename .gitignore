@@ -32,6 +32,7 @@
 *_cache/
 cache/
 scratch/*
+.scratch/
 
 # ------------------------
 # renv directories
