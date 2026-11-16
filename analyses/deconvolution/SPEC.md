@@ -215,6 +215,7 @@ Options for one method only are explicit options named with that method's prefix
 - When matching by symbol, **drop reference genes with an `NA` symbol** (about 20,000 in ScPCA), then sum duplicate reference symbols, with a warning.
 - Intersect reference and bulk genes, and report how many genes were lost.
 - Fail if the matched fraction of bulk genes is below `--min-gene-overlap`.
+- Warn if the matched fraction is below 0.8 (low gene overlap), so the report flags it.
 - No other filtering happens here.
 
 **5. Exclude gene categories** (§8). This runs after intersection and before InstaPrism's `filter`, and applies whatever the method, including to marker selection.

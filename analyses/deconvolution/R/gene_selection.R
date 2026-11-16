@@ -19,9 +19,16 @@
 #' @param bulk Output of read_bulk_matrix().
 #' @param min_gene_overlap Fail if fewer than this fraction of bulk genes
 #'   match the reference.
+#' @param warn_gene_overlap Warn if fewer than this fraction match (but at
+#'   least `min_gene_overlap`).
 #' @return A harmonised genes object (see top of file) plus `funnel`, a list
 #'   of gene counts: `bulk`, `reference`, `shared`.
-harmonise_genes <- function(profiles, bulk, min_gene_overlap) {
+harmonise_genes <- function(
+  profiles,
+  bulk,
+  min_gene_overlap,
+  warn_gene_overlap = 0.8
+) {
   reference <- profiles$counts
   gene_id_type <- bulk$gene_id_type
   if (gene_id_type == "ensembl") {
@@ -60,6 +67,18 @@ harmonise_genes <- function(profiles, bulk, min_gene_overlap) {
       " of bulk genes match the reference (--min-gene-overlap ",
       min_gene_overlap,
       "). Check that the bulk and reference use the same gene IDs and species.",
+      call. = FALSE
+    )
+  }
+  if (overlap < warn_gene_overlap) {
+    warning(
+      "Low gene overlap: only ",
+      sprintf("%.1f%%", 100 * overlap),
+      " of bulk genes match the reference (",
+      length(shared),
+      " of ",
+      nrow(bulk_counts),
+      "). Check that the bulk and reference use the same annotation.",
       call. = FALSE
     )
   }
