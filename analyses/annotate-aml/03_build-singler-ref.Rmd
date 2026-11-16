@@ -1,0 +1,191 @@
+---
+title: "Build a SingleR reference from the AML scAtlas (donors aged 29 and under)"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: "JN Taroni"
+date: 2026
+---
+
+## Introduction
+
+This notebook builds a SingleR reference from the age-filtered AML scAtlas subset written by
+`02_subset-atlas.py` (`data/AML-scAtlas/AML_scAtlas_le29.h5ad`).
+
+- Labels: `label_fine` (predictions can be collapsed to `label_broad` afterwards; every
+  `label_fine` class maps to exactly one `label_broad` class).
+- To keep the large studies from dominating, cells are downsampled to at most
+  `max_cells_per_group` cells per `label_fine` class per donor.
+- Counts are log-normalized with `scuttle::logNormCounts()` on all atlas genes; training is then
+  restricted to genes present in every library of the ScPCA AML project (`SCPCP000007`).
+- The reference is trained with `trainSingleR(de.method = "wilcox", aggr.ref = TRUE)`.
+
+## Setup
+
+```{r setup}
+library(SingleCellExperiment)
+library(SingleR)
+
+set.seed(2026)
+
+# Settings
+max_cells_per_group <- 100 # cap per label_fine class per donor
+label_col <- "label_fine"
+n_workers <- 4
+
+# Paths
+root_dir <- rprojroot::find_root(rprojroot::has_dir(".git"))
+module_dir <- fs::path(root_dir, "analyses", "annotate-aml")
+atlas_file <- fs::path(root_dir, "data", "AML-scAtlas", "AML_scAtlas_le29.h5ad")
+scpca_project <- "SCPCP000007" # ScPCA project made up primarily of AML samples
+scpca_dir <- fs::path(root_dir, "data", "scpca", scpca_project)
+
+results_dir <- fs::path(module_dir, "results")
+fs::dir_create(results_dir)
+ref_sce_file <- fs::path(results_dir, "AML_scAtlas_le29_singler_ref_sce.rds")
+trained_ref_file <- fs::path(results_dir, "AML_scAtlas_le29_singler_trained_ref.rds")
+```
+
+## Genes shared with ScPCA
+
+The ScPCA AnnData files index genes by Ensembl ID (`var/_index`). Only that dataset is read
+from each file, so this is cheap.
+
+```{r scpca-genes}
+scpca_files <- fs::dir_ls(scpca_dir, recurse = TRUE, glob = "*_filtered_rna.h5ad")
+length(scpca_files)
+
+scpca_gene_lists <- purrr::map(
+  scpca_files,
+  \(f) as.character(rhdf5::h5read(f, "var/_index"))
+)
+scpca_genes <- purrr::reduce(scpca_gene_lists, intersect)
+length(scpca_genes)
+```
+
+## Read the atlas subset and downsample
+
+Open the file on disk, so only the metadata is read at first.
+
+```{r open-atlas}
+adata <- anndataR::read_h5ad(atlas_file, as = "HDF5AnnData")
+adata
+
+obs <- adata$obs
+obs$cell_id <- adata$obs_names
+```
+
+How many atlas genes are present in ScPCA?
+
+```{r gene-overlap}
+atlas_genes <- adata$var_names
+shared_genes <- intersect(atlas_genes, scpca_genes)
+c(
+  atlas = length(atlas_genes),
+  scpca = length(scpca_genes),
+  shared = length(shared_genes)
+)
+stopifnot(length(shared_genes) > 0.9 * length(atlas_genes))
+```
+
+Cap each `label_fine` class at `max_cells_per_group` cells per donor.
+
+```{r downsample}
+sampled_obs <- obs |>
+  dplyr::group_by(.data[[label_col]], donor_id) |>
+  dplyr::slice_sample(n = max_cells_per_group) |>
+  dplyr::ungroup()
+
+nrow(sampled_obs)
+```
+
+Cells per label before and after downsampling, with the number of donors contributing to each
+label:
+
+```{r downsample-summary}
+before <- obs |>
+  dplyr::count(.data[[label_col]], name = "n_cells_before")
+
+after <- sampled_obs |>
+  dplyr::group_by(.data[[label_col]]) |>
+  dplyr::summarize(
+    n_cells_after = dplyr::n(),
+    n_donors = dplyr::n_distinct(donor_id),
+    n_studies = dplyr::n_distinct(Study),
+    max_study_fraction = max(table(as.character(Study))) / dplyr::n()
+  )
+
+dplyr::left_join(before, after, by = label_col) |>
+  dplyr::arrange(dplyr::desc(n_cells_after))
+```
+
+## Build the reference SingleCellExperiment
+
+Subset to the sampled cells (keeping file order), then convert. `X` holds raw counts, so it
+becomes the `counts` assay.
+
+```{r convert}
+keep_cells <- obs$cell_id[obs$cell_id %in% sampled_obs$cell_id]
+
+ref_sce <- adata[keep_cells, ]$as_SingleCellExperiment(
+  x_mapping = "counts",
+  assays_mapping = FALSE,
+  colData_mapping = TRUE,
+  rowData_mapping = TRUE,
+  reducedDims_mapping = FALSE,
+  colPairs_mapping = FALSE,
+  rowPairs_mapping = FALSE,
+  metadata_mapping = FALSE
+)
+rm(adata)
+
+# make sure the counts are a sparse matrix in memory
+counts(ref_sce) <- as(counts(ref_sce), "CsparseMatrix")
+ref_sce
+```
+
+Log-normalize using library size factors computed on all atlas genes.
+
+```{r normalize}
+ref_sce <- scuttle::logNormCounts(ref_sce)
+summary(sizeFactors(ref_sce))
+```
+
+## Train SingleR
+
+`restrict` limits marker selection and training to the genes shared with ScPCA.
+`aggr.ref = TRUE` aggregates each label into pseudo-bulk profiles, which keeps the trained
+reference small and classification fast.
+
+```{r train}
+trained_ref <- trainSingleR(
+  ref = ref_sce,
+  labels = ref_sce[[label_col]],
+  de.method = "wilcox",
+  aggr.ref = TRUE,
+  restrict = shared_genes,
+  BPPARAM = BiocParallel::MulticoreParam(workers = n_workers)
+)
+trained_ref
+```
+
+Total number of unique marker genes selected across all labels:
+
+```{r markers}
+marker_genes <- unique(unlist(trained_ref$markers$full))
+length(marker_genes)
+```
+
+## Save
+
+```{r save}
+saveRDS(ref_sce, ref_sce_file)
+saveRDS(trained_ref, trained_ref_file)
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
