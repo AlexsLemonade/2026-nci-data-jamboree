@@ -118,14 +118,16 @@ Both scripts `source()` the files in `R/`. Outputs go only to a user-chosen dire
     # csr_matrix branch: i = ind + 1L, j = rep(seq_len(shp[1]), diff(ptr)) (ptr over cells)
     # categoricals (obs labels, raw/var/gene_symbol): code -1 means NA
     ```
-- **In every case, check that counts are integers**, and fail with a clear message otherwise. This catches normalised `X`.
+- **In every case, check that counts are integers.** Non-integer values are rounded, with a warning that reports the share of non-integer values, so that a normalised `X` read by mistake is easy to spot.
 
 ### Reference samples
 
 A cell's reference sample comes from the first of these that exists:
 1. `--sample-column`;
-2. the sample ID in `metadata(sce)` (or `obs$sample_id`);
-3. the input file's base name, with a note in the build log.
+2. a `sample_id` cell column (e.g. `obs$sample_id`), or a single sample ID in `metadata(sce)`;
+3. the library ID in `metadata(sce)` (or else the input file's base name), with a note in the build log.
+
+A multiplexed library, whose `metadata(sce)` lists several sample IDs, is treated as one reference sample named by its library ID, unless `--sample-column` gives per-cell samples (e.g. a demultiplexing column). There is no other special handling of multiplexed libraries.
 
 Libraries of the same reference sample are summed together.
 
