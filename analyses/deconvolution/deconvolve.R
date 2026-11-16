@@ -219,11 +219,16 @@ if (identical(exclude_categories, "none")) {
 
 # Pipeline ---------------------------------------------------------------------
 
-warnings_seen <- character(0)
+# warnings are recorded with the step that raised them; warnings outside a
+# timed step come from option checks
+warnings_seen <- data.frame(source = character(0), message = character(0))
+current_step <- "options"
 runtimes <- list()
 
 #' Run one pipeline step, recording its runtime in seconds
 timed <- function(step, expr) {
+  current_step <<- step
+  on.exit(current_step <<- "options")
   start <- Sys.time()
   result <- expr
   runtimes[[step]] <<- round(
@@ -408,9 +413,18 @@ run_pipeline <- function() {
       }
     ),
     batch_dependent_settings = batch_dependent_settings(method_opts),
-    warnings = I(warnings_seen),
+    warnings = warnings_seen,
     runtimes_seconds = runtimes,
-    package_versions = run_package_versions(opts$method)
+    package_versions = run_package_versions(opts$method),
+    outputs = list(
+      proportions = out("_proportions.tsv"),
+      run_info = out("_run_info.json"),
+      report = if (!opts$no_report) out("_report.html"),
+      method_object = if (opts$save_method_objects) {
+        out(paste0("_", opts$method, ".rds"))
+      },
+      figures = if (!opts$no_report && opts$save_figures) out("_figures")
+    )
   )
   jsonlite::write_json(
     run_info,
@@ -424,17 +438,21 @@ run_pipeline <- function() {
   message("Wrote ", out("_proportions.tsv"), " and ", out("_run_info.json"))
 
   if (!opts$no_report) {
-    if (exists("render_run_report", mode = "function")) {
+    timed(
+      "report",
       render_run_report(
         proportions_path = out("_proportions.tsv"),
         run_info_path = out("_run_info.json"),
         output_path = out("_report.html"),
+        template = file.path(
+          module_dir,
+          "templates",
+          "run_report_template.Rmd"
+        ),
         figures_dir = if (opts$save_figures) out("_figures"),
         figure_format = opts$figure_format
       )
-    } else {
-      message("Run report not yet implemented; skipping")
-    }
+    )
   }
 }
 
@@ -483,9 +501,12 @@ run_package_versions <- function(method_name) {
   as.list(c(R = as.character(getRversion()), versions))
 }
 
-withCallingHandlers(
+invisible(withCallingHandlers(
   run_pipeline(),
   warning = function(w) {
-    warnings_seen <<- c(warnings_seen, conditionMessage(w))
+    warnings_seen <<- rbind(
+      warnings_seen,
+      data.frame(source = current_step, message = conditionMessage(w))
+    )
   }
-)
+))

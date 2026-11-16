@@ -534,7 +534,7 @@ has_cell_states <- function(reference) {
 #'   `labels`: data.frame(cell_type, cell_state, n_cells, n_samples), one row
 #'     per column of `counts`;
 #'   `genes`: the reference rowData (gene_id, gene_symbol) as a data.frame;
-#'   `dropped`: data.frame(level, label, n_cells) of labels removed by
+#'   `dropped`: data.frame(level, label, cell_type, n_cells) of labels removed by
 #'     `min_cells`.
 prepare_profiles <- function(reference, use_cell_states, min_cells) {
   groups <- as.data.frame(SummarizedExperiment::colData(reference))
@@ -588,7 +588,7 @@ prepare_profiles <- function(reference, use_cell_states, min_cells) {
 #'
 #' @param labels data.frame(cell_type, cell_state, n_cells), one row per state.
 #' @return list(keep = logical per row, dropped = data.frame(level, label,
-#'   n_cells)).
+#'   cell_type, n_cells)).
 apply_min_cells <- function(labels, min_cells) {
   type_cells <- tapply(labels$n_cells, labels$cell_type, sum)
   small_types <- type_cells[type_cells < min_cells]
@@ -609,16 +609,19 @@ apply_min_cells <- function(labels, min_cells) {
     data.frame(
       level = rep("cell_type", length(small_types)),
       label = names(small_types),
+      cell_type = names(small_types),
       n_cells = as.integer(small_types)
     ),
     data.frame(
       level = rep("cell_state", sum(small_state)),
       label = labels$cell_state[small_state],
+      cell_type = labels$cell_type[small_state],
       n_cells = labels$n_cells[small_state]
     ),
     data.frame(
       level = rep("cell_type", length(emptied)),
       label = emptied,
+      cell_type = emptied,
       n_cells = as.integer(type_cells[emptied])
     )
   )

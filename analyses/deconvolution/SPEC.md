@@ -45,7 +45,7 @@ It has two entry points that share functions under `R/`:
   - nnls, optparse, jsonlite, ggplot2, rmarkdown, knitr.
 - **System**: pandoc, for the report.
 - **Not used**: zellkonverter, Quarto.
-- **Code formatting**: all R code in the module is formatted with **[Air](https://posit-dev.github.io/air/)**, Posit's R formatter (`air format analyses/deconvolution`). This includes the scripts, `R/` files, `scripts/`, and the R chunks in `templates/run_report.Rmd`, as far as Air supports them.
+- **Code formatting**: all R code in the module is formatted with **[Air](https://posit-dev.github.io/air/)**, Posit's R formatter (`air format analyses/deconvolution`). This includes the scripts, `R/` files, `scripts/`, and the R chunks in `templates/run_report_template.Rmd`, as far as Air supports them.
 
 ## 3. File layout
 
@@ -59,7 +59,7 @@ analyses/deconvolution/
 │   ├── gene_selection.R              # gene intersection, gene category exclusion, select_markers()
 │   ├── deconvolution_methods.R       # run_<method>() functions and the method registry
 │   └── run_report.R                  # run report rendering and figure functions
-├── templates/run_report.Rmd
+├── templates/run_report_template.Rmd
 ├── reference-files/gene_categories.tsv
 ├── scripts/download_ensembl_gtf.sh  # downloads the Ensembl GTF to data/references/ (git-ignored)
 ├── scripts/make_gene_categories.R   # one-off generator for the gene category table, using Bioc.gff
@@ -295,7 +295,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 ## 10. Run report
 
 **Rendering:**
-- R Markdown (`templates/run_report.Rmd`), rendered by `deconvolve.R` with `rmarkdown::render()` into **one self-contained HTML file**.
+- R Markdown (`templates/run_report_template.Rmd`), rendered by `deconvolve.R` with `rmarkdown::render()` into **one self-contained HTML file**.
 - Use **Quarto-style `#|` chunk options and labels** where possible, to ease a later move to Quarto.
 - **Tabbed layout:** fits (`instaprism` / `instaprism_update_<mode>`) and plot types are tabs within each section.
 
