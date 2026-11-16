@@ -2,6 +2,9 @@
 # Data and results
 # -----------------------
 
+# local scratch directory for working with Claude Code
+.workspace
+
 # root data directory
 /data/
 # standard results directories (keep the readme)
