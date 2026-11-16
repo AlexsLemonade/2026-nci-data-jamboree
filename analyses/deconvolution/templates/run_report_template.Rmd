@@ -333,6 +333,8 @@ print(kable(kept))
 
 ## Run details
 
+<details><summary>Show run details</summary>
+
 ```{r}
 #| label: parameters
 params_list <- info$parameters
@@ -345,18 +347,12 @@ kable(data.frame(Parameter = names(values), Value = values))
 ```
 
 ```{r}
-#| label: runtimes
+#| label: runtime
 #| results: asis
-#| fig-height: 2.6
-runtimes <- info$runtimes_seconds
-if (has_update) {
-  figure(plot_runtimes(runtimes), "runtimes", height = 2.6)
-} else {
-  cat(sprintf(
-    "<p>Total runtime: %.1f s.</p>\n",
-    sum(unlist(runtimes))
-  ))
-}
+cat(sprintf(
+  "<p>Total runtime: %.1f s.</p>\n",
+  sum(unlist(info$runtimes_seconds))
+))
 ```
 
 <details><summary>Bulk samples in this run (`r n_samples`)</summary>
@@ -366,12 +362,7 @@ if (has_update) {
 ```{r}
 #| label: versions-and-outputs
 #| results: asis
-versions <- info$package_versions
-cat(sprintf(
-  "<p>Versions: %s. Run at %s.</p>\n",
-  paste(names(versions), unlist(versions), collapse = " &middot; "),
-  info$timestamp
-))
+cat(sprintf("<p>Run at %s.</p>\n", info$timestamp))
 outputs <- Filter(Negate(is.null), info$outputs)
 cat(
   "<p>Outputs:</p><ul>",
@@ -386,3 +377,30 @@ cat(
   "</ul>\n"
 )
 ```
+
+### Session info
+
+```{r}
+#| label: session-info
+#| results: asis
+si <- info$session_info
+platform <- unlist(si$platform)
+print(kable(
+  data.frame(Setting = names(platform), Value = platform),
+  escape = TRUE
+))
+packages <- as.data.frame(si$packages)
+packages$attached <- ifelse(packages$attached, "*", "")
+cat(sprintf(
+  "<details><summary>%d loaded packages (* = attached)</summary>\n",
+  nrow(packages)
+))
+print(kable(
+  packages[, c("package", "attached", "version", "date", "source", "library")],
+  col.names = c("Package", "", "Version", "Date", "Source", "Library"),
+  escape = TRUE
+))
+cat("</details>\n")
+```
+
+</details>

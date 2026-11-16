@@ -42,7 +42,7 @@ It has two entry points that share functions under `R/`:
 - **Other packages**:
   - SingleCellExperiment, SummarizedExperiment and Matrix;
   - **anndataR** (Bioconductor) and **rhdf5**, installed explicitly since they're only Suggests;
-  - nnls, optparse, jsonlite, ggplot2, rmarkdown, knitr.
+  - nnls, optparse, jsonlite, ggplot2, rmarkdown, knitr, sessioninfo.
 - **System**: pandoc, for the report.
 - **Not used**: zellkonverter, Quarto.
 - **Code formatting**: all R code in the module is formatted with **[Air](https://posit-dev.github.io/air/)**, Posit's R formatter (`air format analyses/deconvolution`). This includes the scripts, `R/` files, `scripts/`, and the R chunks in `templates/run_report_template.Rmd`, as far as Air supports them.
@@ -287,7 +287,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 | File | Contents |
 |---|---|
 | `<prefix>_proportions.tsv` | Long table: `method, reference, level, label, sample_id, quantity, proportion`. `level` is `cell_type` or `cell_state`; `quantity` is `mrna_share` or `cell_share`. Proportions sum to 1 per method × level × bulk sample, except `instaprism_update_malignant` cell-state rows, which cover only the normal cell types (§6, step 6). |
-| `<prefix>_run_info.json` | Parameters, detected gene ID type, gene funnel counts and genes removed (per category and by InstaPrism's filter), reference summary (cells/reference samples per label, dropped labels), warnings, bulk sample list, batch-dependent settings in effect, per-step runtimes, package versions. The report is rendered from this file plus the TSV, so it can be re-rendered without re-fitting. |
+| `<prefix>_run_info.json` | Parameters, detected gene ID type, gene funnel counts and genes removed (per category and by InstaPrism's filter), reference summary (cells/reference samples per label, dropped labels), warnings, bulk sample list, batch-dependent settings in effect, per-step runtimes, and session info from `sessioninfo` (platform and loaded packages; library paths relative to the module, the home directory shown as `~`). The report is rendered from this file plus the TSV, so it can be re-rendered without re-fitting. |
 | `<prefix>_report.html` | Run report (§10); skipped with `--no-report`. |
 | `<prefix>_<method>.rds` | Raw method result object; only with `--save-method-objects`. |
 | `<prefix>_figures/` | Each report figure as a separate file, named by its report chunk label (e.g. `proportions_instaprism.png`). Only with `--save-figures`; `--figure-format png` or `pdf`. Made by the same plotting functions as the report. |
@@ -330,11 +330,11 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - genes removed per category;
    - a collapsible list of genes removed by InstaPrism's filter;
    - a reference table of cells and reference samples per cell type/state, with dropped labels marked.
-7. **Run details**:
+7. **Run details**, collapsed by default:
    - parameters;
-   - a runtime graph (**only when the fit-comparison section is shown**; otherwise total runtime as text);
+   - total runtime;
    - a collapsible bulk sample list;
-   - versions;
+   - session info (platform and loaded packages);
    - output paths.
 
 **For implementation:** give the cell-state plot a legend per cell type, rather than one shared legend, so it stays readable when there are many states.

@@ -294,18 +294,3 @@ plot_gene_funnel <- function(funnel) {
     ) +
     ggplot2::labs(x = "Genes", y = NULL)
 }
-
-#' Runtime per pipeline step
-plot_runtimes <- function(runtimes) {
-  d <- data.frame(
-    step = factor(names(runtimes), levels = rev(names(runtimes))),
-    seconds = unlist(runtimes)
-  )
-  ggplot2::ggplot(d, ggplot2::aes(seconds, step)) +
-    ggplot2::geom_col(fill = "grey50") +
-    ggplot2::labs(
-      x = "Seconds",
-      y = NULL,
-      title = sprintf("Runtime (total %.1f s)", sum(d$seconds))
-    )
-}

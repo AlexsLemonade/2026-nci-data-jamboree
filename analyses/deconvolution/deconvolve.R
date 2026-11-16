@@ -415,7 +415,7 @@ run_pipeline <- function() {
     batch_dependent_settings = batch_dependent_settings(method_opts),
     warnings = warnings_seen,
     runtimes_seconds = runtimes,
-    package_versions = run_package_versions(opts$method),
+    session_info = session_info_for_json(),
     outputs = list(
       proportions = out("_proportions.tsv"),
       run_info = out("_run_info.json"),
@@ -486,19 +486,59 @@ batch_dependent_settings <- function(method_opts) {
   settings
 }
 
-#' Versions of R and the packages used for this run
-run_package_versions <- function(method_name) {
-  pkgs <- c("SummarizedExperiment", "Matrix", "data.table", "jsonlite")
-  pkgs <- c(
-    pkgs,
-    switch(method_name, instaprism = "InstaPrism", nnls = "nnls")
+#' Platform and loaded packages from sessioninfo, in a JSON-friendly form
+#'
+#' Library paths are shown relative to the module directory, and other paths
+#' with the home directory replaced by `~`, so run info doesn't expose them.
+session_info_for_json <- function() {
+  si <- sessioninfo::session_info(info = c("platform", "packages"))
+  packages <- as.data.frame(si$packages)
+  list(
+    platform = lapply(unclass(si$platform), function(x) {
+      hide_home(as.character(x))
+    }),
+    packages = data.frame(
+      package = packages$package,
+      version = packages$loadedversion,
+      attached = packages$attached,
+      date = packages$date,
+      source = packages$source,
+      library = relative_to_module(package_library(packages$package))
+    )
   )
-  versions <- vapply(
-    pkgs,
-    function(p) as.character(utils::packageVersion(p)),
-    character(1)
+}
+
+#' The library (from .libPaths()) each package is installed in
+#'
+#' renv links packages from its cache, so sessioninfo's own library column is
+#' often empty; look the package up in each library instead.
+package_library <- function(packages) {
+  libs <- .libPaths()
+  vapply(
+    packages,
+    function(pkg) {
+      found <- libs[file.exists(file.path(libs, pkg, "DESCRIPTION"))]
+      if (length(found) > 0) found[1] else NA_character_
+    },
+    character(1),
+    USE.NAMES = FALSE
   )
-  as.list(c(R = as.character(getRversion()), versions))
+}
+
+#' Paths under the module directory as relative paths; others via hide_home()
+relative_to_module <- function(paths) {
+  prefix <- paste0(module_dir, "/")
+  ifelse(
+    startsWith(paths, prefix),
+    substring(paths, nchar(prefix) + 1),
+    hide_home(paths)
+  )
+}
+
+#' Replace the home directory in text with `~`
+hide_home <- function(text) {
+  home <- normalizePath("~", mustWork = FALSE)
+  gsub(home, "~", text, fixed = TRUE)
 }
 
 invisible(withCallingHandlers(
