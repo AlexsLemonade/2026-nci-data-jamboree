@@ -5,7 +5,7 @@
 # Input: an Ensembl GRCh38 GTF (download with download_ensembl_gtf.sh).
 # Output: a TSV with one row per gene x category: gene_id, gene_symbol, category.
 #
-# Categories (see SPEC.md, "Gene category exclusion"):
+# Categories:
 #   mitochondrial  genes on the mitochondrial chromosome (MT-)
 #   ribosomal      protein-coding RPS/RPL genes (incl. RPLP0/1/2, RPSA) and
 #                  mito-ribosomal MRPS/MRPL

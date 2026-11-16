@@ -179,8 +179,8 @@ Pooled profiles per cell type or cell state are not stored. `deconvolve.R` compu
 | `--method` | `instaprism` | **One method per run**: `instaprism` or `nnls` (others once added). Comparing methods means separate runs |
 | `--use-cell-states` / `--no-cell-states` | on if the reference has states and the method reports cell states | Off collapses cell states to cell types before fitting. Always off for methods that fit only at cell-type level (§7) |
 | `--min-cells` | `10` | Cell states/types with fewer cells are dropped, with a warning |
-| `--malignant-cell-type` | none | Names the **malignant cell type**; turns on the InstaPrism reference update |
-| `--update-mode` | `all` | `all` or `malignant` (see §6, step 6) |
+| `--malignant-cell-type` | none | Names the **malignant cell type**; turns on the InstaPrism reference update in modes `all` and `malignant` |
+| `--update-mode` | `all` | With `--malignant-cell-type`: `malignant` (update only the malignant profile, per bulk sample) or `all` (also re-estimate normal profiles, pooled across the run). Without it: `pooled` (re-estimate every profile, pooled across the run). See §6, step 6. `all`/`malignant` without `--malignant-cell-type` warn and run no update; `pooled` with it warns that it's unused |
 | `--instaprism-filter` / `--no-instaprism-filter` | on | InstaPrism's outlier-gene filter |
 | `--exclude-gene-categories` | `mitochondrial,ribosomal,sex` | Categories from the gene category table to exclude; `none` disables |
 | `--gene-categories` | `reference-files/gene_categories.tsv` | Gene category table to use |
@@ -219,23 +219,23 @@ Options for one method only are explicit options named with that method's prefix
 
 **5. Exclude gene categories** (§8). This runs after intersection and before InstaPrism's `filter`, and applies whatever the method, including to marker selection.
 
-**6. Run the chosen method** (§7). Only one method runs per call to `deconvolve.R`. InstaPrism with the reference update reports two fits from that one method: `instaprism` and `instaprism_updated`.
+**6. Run the chosen method** (§7). Only one method runs per call to `deconvolve.R`. InstaPrism with the reference update reports two fits from that one method: `instaprism` and `instaprism_update_malignant`, `instaprism_update_all` or `instaprism_update_pooled`, named for the update mode.
 
 **InstaPrism:**
 - **Build the reference** with the exported `refPrepare(sc_Expr = summed counts per cell state, cell.type.labels, cell.state.labels)`. It accepts summed counts, so per-cell data isn't needed. Don't use internal (`:::`) functions.
 - **Initial fit:** `InstaPrism(bulk_Expr, refPhi_cs, filter = <--instaprism-filter>, n.core = <--n-cores>)`.
   - Cell-type proportions are in `@Post.ini.ct@theta`; cell-state proportions are in `@Post.ini.cs@theta`.
   - Report it as method `instaprism`, at level `cell_type`, plus level `cell_state` when cell states are used.
-- **Reference update** (only with `--malignant-cell-type`): `InstaPrism_update(obj, bulk_Expr, key = <malignant cell type>, cell.types.to.update = "all"` for `--update-mode all`, or `NULL` for `malignant`).
-  - **What it does:** the malignant profile is re-estimated **separately for each bulk sample**. In `all` mode, each normal cell type's profile is also re-estimated **once, pooled over every bulk sample in the initial call**, weighted by sequencing depth.
-  - **What it reports:** method `instaprism_updated`.
-    - **Cell-type level, in both modes:** complete, from `merge_updated_theta()`.
+- **Reference update** (with `--malignant-cell-type`, or with `--update-mode pooled`): `InstaPrism_update(obj, bulk_Expr, key = <malignant cell type>, cell.types.to.update = "all"` for `--update-mode all`, or `NULL` for `malignant`). For `pooled`: `key = NA, cell.types.to.update = "all"`.
+  - **What it does:** the malignant profile is re-estimated **separately for each bulk sample**. In `all` mode, each normal cell type's profile is also re-estimated **once, pooled over every bulk sample in the initial call**, weighted by sequencing depth. In `pooled` mode there is no malignant cell type: **every** cell type's profile is re-estimated once, pooled over every bulk sample, so the updated reference is the same for all samples.
+  - **What it reports:** method `instaprism_update_malignant` (`--update-mode malignant`: only the malignant profile updated) or `instaprism_update_all` (`--update-mode all`: normal profiles also updated) or `instaprism_update_pooled` (`--update-mode pooled`: every profile updated, pooled).
+    - **Cell-type level, in every mode:** complete, from `merge_updated_theta()`.
     - **Cell-state level, `malignant` mode only:** rows for the normal cell types only. The malignant cell type has no updated cell-state breakdown, so these rows are partial and don't sum to 1.
-    - `all` mode has no cell-state rows.
+    - `all` and `pooled` modes have no cell-state rows.
   - Updated cell types lose their cell-state proportions, so cell-state proportions for updated types come from the initial fit.
   - **Pass the identical bulk matrix**, same columns in the same order, to both calls. The update matches bulk samples **by column position**, so a reordered or subset matrix runs silently with wrong results.
   - **Look up `@theta` rows by name, not position.** The malignant cell type comes first, and levels are mixed.
-- **Never split bulk samples across calls.** `--update-mode all` and `--instaprism-filter` both make results depend on which bulk samples share the run.
+- **Never split bulk samples across calls.** `--update-mode all`, `--update-mode pooled` and `--instaprism-filter` all make results depend on which bulk samples share the run.
 
 **NNLS:**
 - Fits at **cell-type level only**, on the markers from `select_markers()`.
@@ -286,7 +286,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 
 | File | Contents |
 |---|---|
-| `<prefix>_proportions.tsv` | Long table: `method, reference, level, label, sample_id, quantity, proportion`. `level` is `cell_type` or `cell_state`; `quantity` is `mrna_share` or `cell_share`. Proportions sum to 1 per method × level × bulk sample, except `instaprism_updated` cell-state rows in `malignant` mode, which cover only the normal cell types (§6, step 6). |
+| `<prefix>_proportions.tsv` | Long table: `method, reference, level, label, sample_id, quantity, proportion`. `level` is `cell_type` or `cell_state`; `quantity` is `mrna_share` or `cell_share`. Proportions sum to 1 per method × level × bulk sample, except `instaprism_update_malignant` cell-state rows, which cover only the normal cell types (§6, step 6). |
 | `<prefix>_run_info.json` | Parameters, detected gene ID type, gene funnel counts and genes removed (per category and by InstaPrism's filter), reference summary (cells/reference samples per label, dropped labels), warnings, bulk sample list, batch-dependent settings in effect, per-step runtimes, package versions. The report is rendered from this file plus the TSV, so it can be re-rendered without re-fitting. |
 | `<prefix>_report.html` | Run report (§10); skipped with `--no-report`. |
 | `<prefix>_<method>.rds` | Raw method result object; only with `--save-method-objects`. |
@@ -297,7 +297,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
 **Rendering:**
 - R Markdown (`templates/run_report.Rmd`), rendered by `deconvolve.R` with `rmarkdown::render()` into **one self-contained HTML file**.
 - Use **Quarto-style `#|` chunk options and labels** where possible, to ease a later move to Quarto.
-- **Tabbed layout:** fits (`instaprism` / `instaprism_updated`) and plot types are tabs within each section.
+- **Tabbed layout:** fits (`instaprism` / `instaprism_update_<mode>`) and plot types are tabs within each section.
 
 **Sections, in order:**
 
@@ -314,7 +314,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - duplicate IDs;
    - low gene overlap;
    - **small bulk sets** (fewer than ~10 bulk samples), where InstaPrism's `filter` lets a single sample decide which genes are dropped.
-3. **Batch-dependent settings** active in this run (`--update-mode all`, `--instaprism-filter`), with a one-line reason each and a link to the bulk sample list.
+3. **Batch-dependent settings** active in this run (`--update-mode all` or `pooled`, `--instaprism-filter`), with a one-line reason each and a link to the bulk sample list.
 4. **Proportions**:
    - stacked bars per bulk sample for each fit, samples ordered by the malignant proportion (InstaPrism initial fit when there is one), or by the largest cell type when no malignant cell type is named, one fixed colour per cell type across all plots;
    - cell-state composition within each cell type that has more than one state, only for methods that report cell states (InstaPrism initial fit);
@@ -343,11 +343,12 @@ A prototype report on synthetic data is on branch `claude/prototype/run-report` 
 
 ## 11. Behaviour notes
 
-**Batch dependence.** Two settings make a bulk sample's estimates depend on the other bulk samples in the run. Both are allowed; the report records them.
+**Batch dependence.** These settings make a bulk sample's estimates depend on the other bulk samples in the run. Both are allowed; the report records them.
 - **`--update-mode all`:** the normal cell-type profiles are pooled across the run. In claude-science's T-ALL run, the same reference gave pseudobulk RMSE 0.022 as one 225-sample call versus 0.048 in per-patient calls.
+- **`--update-mode pooled`:** every cell-type profile is pooled across the run.
 - **InstaPrism's `filter`:** it drops genes above 1% of reads in more than 10% of the run's bulk samples. Estimates shifted by up to about 0.017 between batch compositions.
 
-With `--no-instaprism-filter`, the initial InstaPrism fit and the `malignant`-mode update both give estimates for each sample that don't depend on the rest of the run. The `all`-mode update always depends on the run.
+With `--no-instaprism-filter`, the initial InstaPrism fit and the `malignant`-mode update both give estimates for each sample that don't depend on the rest of the run. The `all`- and `pooled`-mode updates always depend on the run.
 
 **Choosing an update mode.** In the AML pilot:
 - `malignant` mode fit high-blast samples better: real-bulk diagnosis RMSE 0.028 versus 0.073 for `all`.

@@ -1,5 +1,5 @@
 # Gene selection for deconvolve.R: matching bulk and reference genes, gene
-# category exclusion, and marker selection (SPEC.md §6 steps 4-5, §7, §8).
+# category exclusion, and marker selection.
 #
 # The harmonised genes object passed between these functions is a list:
 #   reference  sparse summed counts, genes x labels (from prepare_profiles())

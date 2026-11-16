@@ -2,7 +2,7 @@
 # sample x cell state; and preparing it at run time (deconvolve.R): loading,
 # validating, pooling per cell state and applying --min-cells.
 #
-# The reference is a SummarizedExperiment (see SPEC.md, "Reference object"):
+# The reference is a SummarizedExperiment:
 #   assay "counts"  sparse summed counts, genes x (reference sample x cell state)
 #   colData         sample_id, cell_type, cell_state, n_cells
 #   rowData         gene_id, gene_symbol

@@ -1,4 +1,4 @@
-# Deconvolution methods and the method registry (SPEC.md §6 step 6, §7).
+# Deconvolution methods and the method registry.
 #
 # Every method has the signature run_<method>(reference, bulk, options):
 #   reference  list(counts, labels, markers):
@@ -107,13 +107,23 @@ theta_to_long <- function(theta, method, level, quantity) {
 #'
 #' The reference is built with refPrepare() from summed counts per cell
 #' state. The initial fit is reported as method `instaprism` (cell_type, plus
-#' cell_state when the reference has cell states). With a malignant cell
-#' type, InstaPrism_update() re-estimates the malignant profile per bulk
-#' sample (and, in `all` mode, the normal profiles pooled across the run);
-#' it is reported as `instaprism_updated` (see SPEC.md §6 step 6).
+#' cell_state when the reference has cell states).
+#'
+#' With a malignant cell type, or with update mode `pooled`,
+#' InstaPrism_update() runs as well, and its fit is reported under a method
+#' named for the update mode:
+#'   `instaprism_update_malignant`: only the malignant profile is updated,
+#'     re-estimated separately for each bulk sample; normal profiles are the
+#'     reference's.
+#'   `instaprism_update_all`: the malignant profile is updated per bulk
+#'     sample, and each normal cell type's profile is also re-estimated once,
+#'     pooled across all bulk samples in the run.
+#'   `instaprism_update_pooled`: no malignant cell type; every cell type's
+#'     profile is re-estimated once, pooled across all bulk samples in the
+#'     run (InstaPrism's `key = NA`). Cell types only.
 #'
 #' Options: `instaprism_filter`, `malignant_cell_type`, `update_mode`
-#' (`all` or `malignant`), `n_cores`.
+#' (`all`, `malignant` or `pooled`), `n_cores`.
 run_instaprism <- function(reference, bulk, options) {
   suppressPackageStartupMessages(library(InstaPrism))
   quantity <- DECONVOLUTION_METHODS$instaprism$quantity
@@ -129,9 +139,13 @@ run_instaprism <- function(reference, bulk, options) {
       call. = FALSE
     )
   }
-  if (!options$update_mode %in% c("all", "malignant")) {
-    stop("--update-mode must be 'all' or 'malignant'", call. = FALSE)
+  if (!options$update_mode %in% c("all", "malignant", "pooled")) {
+    stop("--update-mode must be 'all', 'malignant' or 'pooled'", call. = FALSE)
   }
+  # `pooled` updates every profile without a malignant cell type; the other
+  # modes need one
+  pooled <- options$update_mode == "pooled"
+  run_update <- pooled || !is.null(malignant)
   if (options$instaprism_filter && ncol(bulk) < 10) {
     warning(
       "InstaPrism's filter is on with only ",
@@ -189,25 +203,30 @@ run_instaprism <- function(reference, bulk, options) {
     )),
     filter = options$instaprism_filter,
     malignant_cell_type = malignant,
-    update_mode = if (!is.null(malignant)) options$update_mode
+    update_mode = if (run_update) options$update_mode
   )
   object <- list(initial = fit)
 
-  if (!is.null(malignant)) {
+  if (run_update) {
+    update_method <- paste0("instaprism_update_", options$update_mode)
     # the update matches bulk samples by column position: pass the same matrix
-    updated <- quietly(InstaPrism::InstaPrism_update(
+    updated <- suppressMessages(quietly(InstaPrism::InstaPrism_update(
       InstaPrism_obj = fit,
       bulk_Expr = bulk,
-      key = malignant,
+      key = if (pooled) NA else malignant,
       n.core = options$n_cores,
-      cell.types.to.update = if (options$update_mode == "all") "all" else NULL
-    ))
+      cell.types.to.update = if (options$update_mode == "malignant") {
+        NULL
+      } else {
+        "all"
+      }
+    )))
     object$updated <- updated
     proportions <- c(
       proportions,
       list(theta_to_long(
         InstaPrism::merge_updated_theta(updated),
-        "instaprism_updated",
+        update_method,
         "cell_type",
         quantity
       ))
@@ -220,7 +239,7 @@ run_instaprism <- function(reference, bulk, options) {
         proportions,
         list(theta_to_long(
           updated@theta[state_rows, , drop = FALSE],
-          "instaprism_updated",
+          update_method,
           "cell_state",
           quantity
         ))
