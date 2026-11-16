@@ -1,0 +1,415 @@
+---
+title: "Deconvolution run report"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    self_contained: true
+    theme: flatly
+    # keep "--option" text as typed rather than turning "--" into a dash
+    md_extensions: -smart
+params:
+  proportions: null
+  run_info: null
+  figures_dir: null
+  figure_format: "png"
+---
+
+```{r}
+#| label: setup
+#| include: false
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  dev = "png",
+  dpi = 96
+)
+suppressPackageStartupMessages(library(ggplot2))
+theme_set(theme_minimal(base_size = 12))
+
+run <- load_run_report_data(params$proportions, params$run_info)
+props <- run$proportions
+info <- run$info
+
+fits <- report_fits(props)
+malignant <- info$method$options$malignant_cell_type
+labels <- info$reference$labels
+ct <- props[props$level == "cell_type", ]
+colours <- cell_type_colours(ct$label, malignant)
+ordered_samples <- sample_order(props, fits$initial, malignant)
+n_samples <- length(info$bulk$samples)
+# above ~60 bulk samples, per-sample labels are unreadable
+show_labels <- n_samples <= 60
+has_update <- !is.na(fits$updated)
+
+figure <- function(plot, name, width = 10, height = 4.5) {
+  show_figure(
+    plot,
+    name,
+    params$figures_dir,
+    params$figure_format,
+    width,
+    height
+  )
+}
+kable <- function(x, ...) {
+  knitr::kable(
+    x,
+    format = "html",
+    table.attr = 'class="table table-sm"',
+    row.names = FALSE,
+    ...
+  )
+}
+html_escape <- function(x) htmltools::htmlEscape(x)
+
+funnel <- info$genes$funnel
+genes_used <- funnel$used_by_method %||% funnel$after_exclusion
+warnings_tbl <- if (length(info$warnings) > 0) {
+  as.data.frame(info$warnings)
+} else {
+  data.frame(source = character(0), message = character(0))
+}
+method_label <- if (has_update) {
+  paste0(info$method$name, " + update (", info$method$options$update_mode, ")")
+} else {
+  info$method$name
+}
+```
+
+<style>
+.keyfacts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin: 12px 0 20px; }
+.keyfacts div { background: #f4f6f8; border-radius: 6px; padding: 8px 12px; }
+.keyfacts b { display: block; font-size: 1.35em; word-break: break-word; }
+.keyfacts span { color: #555; font-size: 0.85em; }
+.warnbox { border-left: 4px solid #e08214; background: #fff7ec; padding: 6px 12px; margin: 6px 0; }
+.notebox { border-left: 4px solid #4393c3; background: #f0f6fb; padding: 6px 12px; margin: 6px 0; }
+.batch { border-left: 4px solid #8073ac; background: #f5f3fa; padding: 6px 12px; margin: 6px 0; }
+</style>
+
+<div class="keyfacts">
+<div><b>`r n_samples`</b><span>bulk samples</span></div>
+<div><b>`r html_escape(info$reference$name)`</b><span>reference</span></div>
+<div><b>`r length(unique(labels$cell_state))` / `r length(unique(labels$cell_type))`</b><span>cell states / cell types</span></div>
+<div><b>`r fmt_n(genes_used)`</b><span>genes used (of `r fmt_n(funnel$bulk)` in bulk)</span></div>
+<div><b>`r html_escape(method_label)`</b><span>method</span></div>
+<div><b>`r nrow(warnings_tbl)`</b><span>warnings</span></div>
+</div>
+
+## Warnings
+
+```{r}
+#| label: warnings
+#| results: asis
+if (nrow(warnings_tbl) == 0) {
+  cat('<div class="notebox">No warnings.</div>\n')
+}
+for (i in seq_len(nrow(warnings_tbl))) {
+  cat(sprintf(
+    '<div class="warnbox"><b>WARNING</b> (%s): %s</div>\n',
+    html_escape(warnings_tbl$source[i]),
+    html_escape(warnings_tbl$message[i])
+  ))
+}
+```
+
+### Batch-dependent settings
+
+```{r}
+#| label: batch-dependent
+#| results: asis
+batch <- info$batch_dependent_settings
+if (length(batch) == 0) {
+  cat(
+    "<p>None: each bulk sample's estimates do not depend on the other",
+    "bulk samples in this run.</p>\n"
+  )
+} else {
+  for (setting in names(batch)) {
+    cat(sprintf(
+      '<div class="batch"><code>%s</code>: %s</div>\n',
+      setting,
+      html_escape(batch[[setting]])
+    ))
+  }
+  cat(sprintf(
+    paste(
+      "<p>Running a subset of these %d bulk samples, or adding samples,",
+      "will change the estimates. The full sample list is under",
+      "<a href='#run-details'>Run details</a>.</p>\n"
+    ),
+    n_samples
+  ))
+}
+```
+
+## Proportions {.tabset .tabset-pills}
+
+```{r}
+#| label: proportions
+#| results: asis
+#| fig-height: 4.5
+order_note <- if (!is.null(malignant) && malignant %in% ct$label) {
+  paste0("samples ordered by ", malignant, " proportion in ", fits$initial)
+} else {
+  paste0("samples ordered by the largest cell type in ", fits$initial)
+}
+for (fit in unique(ct$method)) {
+  cat(sprintf("\n\n### %s\n\n", fit))
+  figure(
+    plot_stacked_proportions(
+      ct[ct$method == fit, ],
+      colours,
+      ordered_samples,
+      title = sprintf("Cell-type proportions: %s", fit),
+      subtitle = paste0("Bulk ", order_note),
+      show_labels = show_labels
+    ),
+    paste0("proportions_", fit)
+  )
+}
+```
+
+```{r}
+#| label: cell-states
+#| results: asis
+#| fig-height: 3.5
+# cell states only from the initial fit, for cell types with several states
+cs <- props[props$method == fits$initial & props$level == "cell_state", ]
+states_per_type <- table(labels$cell_type)
+multi_state_types <- names(states_per_type[states_per_type > 1])
+if (nrow(cs) > 0 && length(multi_state_types) > 0) {
+  cat("\n\n### Cell states within cell types\n\n")
+  type_of <- stats::setNames(labels$cell_type, labels$cell_state)
+  for (type in multi_state_types) {
+    # one plot per cell type, so each has its own legend
+    figure(
+      plot_cell_states(
+        cs[type_of[cs$label] == type, ],
+        type,
+        ordered_samples,
+        show_labels = show_labels
+      ),
+      paste0("cell_states_", make.names(type)),
+      height = 3.5
+    )
+  }
+}
+```
+
+### Heatmap
+
+```{r}
+#| label: heatmap
+#| fig-height: 4
+figure(
+  plot_proportion_heatmap(ct, colours, ordered_samples, show_labels = show_labels),
+  "heatmap",
+  height = 1.5 + 2.5 * length(unique(ct$method))
+)
+```
+
+```{r}
+#| label: fit-comparison
+#| results: asis
+#| fig-height: 5
+if (has_update) {
+  cat("\n\n## Fit comparison {.tabset .tabset-pills}\n\n")
+  cat(sprintf("\n\n### %s against %s\n\n", fits$updated, fits$initial))
+  figure(
+    plot_fit_comparison(ct, fits$initial, fits$updated, colours),
+    "fit_comparison",
+    width = 7,
+    height = 5
+  )
+
+  cat("\n\n### Distributions by cell type\n\n")
+  figure(plot_fit_distributions(ct, colours), "fit_distributions")
+
+  cat("\n\n### Mean proportions\n\n")
+  means <- aggregate(proportion ~ label + method, data = ct, FUN = mean)
+  means$proportion <- sprintf("%.1f%%", 100 * means$proportion)
+  wide <- stats::reshape(
+    means,
+    idvar = "label",
+    timevar = "method",
+    direction = "wide"
+  )
+  names(wide) <- sub("^proportion\\.", "", names(wide))
+  names(wide)[1] <- "Cell type"
+  print(kable(wide[order(wide[[1]]), ]))
+}
+```
+
+## Inputs {.tabset .tabset-pills}
+
+### Genes
+
+```{r}
+#| label: gene-funnel
+#| fig-height: 2.8
+figure(plot_gene_funnel(funnel), "gene_funnel", height = 2.8)
+```
+
+Bulk gene IDs were detected as **`r info$bulk$gene_id_type`**`r if (info$bulk$gene_id_type == "ensembl") " (version suffixes stripped)" else ""`; `r fmt_n(funnel$bulk_rows_read)` rows were read from the bulk file.
+
+```{r}
+#| label: excluded-genes
+#| results: asis
+n_markers <- info$genes$n_markers
+if (!is.null(n_markers)) {
+  cat(sprintf(
+    "<p>%s used %s marker genes (up to %d per cell type).</p>\n",
+    info$method$name,
+    fmt_n(n_markers),
+    info$parameters$n_markers
+  ))
+}
+excluded <- info$genes$excluded_genes
+categories <- info$genes$excluded_categories
+if (length(categories) == 0) {
+  cat("<p>No gene categories were excluded.</p>\n")
+} else {
+  counts <- vapply(categories, function(x) length(excluded[[x]]), integer(1))
+  print(kable(
+    data.frame(category = categories, genes = counts),
+    col.names = c("Excluded category", "Genes removed")
+  ))
+}
+filtered <- info$method$info$genes_removed_by_filter
+if (!is.null(filtered)) {
+  cat(sprintf(
+    "<details><summary>%d genes removed by InstaPrism's outlier filter</summary>\n%s\n</details>\n",
+    length(filtered),
+    html_escape(paste(filtered, collapse = ", "))
+  ))
+}
+```
+
+### Reference
+
+```{r}
+#| label: reference-summary
+#| results: asis
+build <- info$reference$build
+cat(sprintf(
+  "<p>Reference <b>%s</b>%s. Cell states were %s in this run.</p>\n",
+  html_escape(info$reference$name),
+  if (length(build$input_files) > 0) {
+    sprintf(", built from %d file(s)", length(build$input_files))
+  } else {
+    ""
+  },
+  if (isTRUE(info$reference$cell_states_used)) "used" else "not used"
+))
+```
+
+```{r}
+#| label: reference-table
+#| results: asis
+kept <- data.frame(
+  `Cell type` = labels$cell_type,
+  `Cell state` = labels$cell_state,
+  Cells = labels$n_cells,
+  `Reference samples` = labels$n_samples,
+  Status = "",
+  check.names = FALSE
+)
+dropped <- info$reference$dropped_labels
+if (length(dropped) > 0 && nrow(as.data.frame(dropped)) > 0) {
+  dropped <- as.data.frame(dropped)
+  kept <- rbind(
+    kept,
+    data.frame(
+      `Cell type` = dropped$cell_type,
+      `Cell state` = ifelse(dropped$level == "cell_state", dropped$label, ""),
+      Cells = dropped$n_cells,
+      `Reference samples` = "",
+      Status = sprintf(
+        "dropped (fewer than %d cells)",
+        info$parameters$min_cells
+      ),
+      check.names = FALSE
+    )
+  )
+}
+kept <- kept[order(kept$`Cell type`, kept$`Cell state`), ]
+kept$Cells <- fmt_n(kept$Cells)
+print(kable(kept))
+```
+
+## Run details
+
+<details><summary>Show run details</summary>
+
+```{r}
+#| label: parameters
+params_list <- info$parameters
+values <- vapply(
+  params_list,
+  function(x) if (is.null(x)) "" else paste(x, collapse = ", "),
+  character(1)
+)
+kable(data.frame(Parameter = names(values), Value = values))
+```
+
+```{r}
+#| label: runtime
+#| results: asis
+cat(sprintf(
+  "<p>Total runtime: %.1f s.</p>\n",
+  sum(unlist(info$runtimes_seconds))
+))
+```
+
+<details><summary>Bulk samples in this run (`r n_samples`)</summary>
+`r html_escape(paste(info$bulk$samples, collapse = ", "))`
+</details>
+
+```{r}
+#| label: versions-and-outputs
+#| results: asis
+cat(sprintf("<p>Run at %s.</p>\n", info$timestamp))
+outputs <- Filter(Negate(is.null), info$outputs)
+cat(
+  "<p>Outputs:</p><ul>",
+  paste0(
+    "<li>",
+    names(outputs),
+    ": <code>",
+    html_escape(unlist(outputs)),
+    "</code></li>",
+    collapse = ""
+  ),
+  "</ul>\n"
+)
+```
+
+### Session info
+
+```{r}
+#| label: session-info
+#| results: asis
+si <- info$session_info
+platform <- unlist(si$platform)
+print(kable(
+  data.frame(Setting = names(platform), Value = platform),
+  escape = TRUE
+))
+packages <- as.data.frame(si$packages)
+packages$attached <- ifelse(packages$attached, "*", "")
+cat(sprintf(
+  "<details><summary>%d loaded packages (* = attached)</summary>\n",
+  nrow(packages)
+))
+print(kable(
+  packages[, c("package", "attached", "version", "date", "source", "library")],
+  col.names = c("Package", "", "Version", "Date", "Source", "Library"),
+  escape = TRUE
+))
+cat("</details>\n")
+```
+
+</details>

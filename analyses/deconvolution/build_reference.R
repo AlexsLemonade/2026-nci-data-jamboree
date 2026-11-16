@@ -3,7 +3,7 @@
 #
 # Reads one or more SingleCellExperiment (.rds) or AnnData (.h5ad) files, sums
 # raw counts per reference sample x cell state, and saves the reference as a
-# SummarizedExperiment (.rds) for deconvolve.R. See SPEC.md.
+# SummarizedExperiment (.rds) for deconvolve.R.
 #
 # Example:
 #   Rscript build_reference.R \
