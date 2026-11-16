@@ -5,7 +5,7 @@
 #   - full: trained on every study; this is the reference used on ScPCA
 #   - held-out: trained without HOLDOUT_STUDY, for validation (outputs suffixed _no-<study>)
 #
-# Prerequisite: data/AML-scAtlas/AML_scAtlas.h5ad (00_download-cxg-aml-scatlas.sh).
+# Prerequisite: data/AML-scAtlas/AML_scAtlas.h5ad (00_download-reference-data.sh).
 #
 # Usage (from anywhere):
 #   bash analyses/annotate-aml/run-references.sh
@@ -50,7 +50,7 @@ render_singler() {
 }
 
 if [[ ! -f "${atlas_file}" ]]; then
-  echo "Missing ${atlas_file}; run 00_download-cxg-aml-scatlas.sh first." >&2
+  echo "Missing ${atlas_file}; run 00_download-reference-data.sh first." >&2
   exit 1
 fi
 
