@@ -151,7 +151,7 @@ A plain **`SummarizedExperiment`** (no wrapper class):
 - **Columns**: one per **reference sample** × cell state. `colData` columns: `sample_id`, `cell_type`, `cell_state`, `n_cells`.
 - **Rows**: every input gene. `rowData` columns: `gene_id` (Ensembl, no version suffix) and `gene_symbol`.
 - **`metadata(se)`**:
-  - `schema_version`: an integer. Start at `1`.
+  - `deconvolution_reference_version`: an integer identifying the reference format produced by this tool. Start at `1`.
   - `reference_name`
   - `build`: a list holding:
     - input files and their MD5s;
@@ -164,7 +164,7 @@ A plain **`SummarizedExperiment`** (no wrapper class):
 
 Pooled profiles per cell type or cell state are not stored. `deconvolve.R` computes them by summing columns.
 
-`deconvolve.R` accepts any `SummarizedExperiment` with a supported `schema_version` and the required `colData` columns, and refuses anything else with a clear message.
+`deconvolve.R` accepts any `SummarizedExperiment` with a supported `deconvolution_reference_version` and the required `colData` columns, and refuses anything else with a clear message.
 
 ## 6. `deconvolve.R`
 
