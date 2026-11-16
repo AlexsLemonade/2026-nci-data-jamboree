@@ -372,7 +372,7 @@ run_pipeline <- function() {
   run_info <- list(
     tool = "deconvolve.R",
     timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
-    parameters = opts[setdiff(names(opts), "help")],
+    parameters = run_parameters(method_opts),
     method = list(
       name = opts$method,
       options = method_opts,
@@ -438,22 +438,48 @@ run_pipeline <- function() {
   message("Wrote ", out("_proportions.tsv"), " and ", out("_run_info.json"))
 
   if (!opts$no_report) {
-    timed(
-      "report",
-      render_run_report(
-        proportions_path = out("_proportions.tsv"),
-        run_info_path = out("_run_info.json"),
-        output_path = out("_report.html"),
-        template = file.path(
-          module_dir,
-          "templates",
-          "run_report_template.Rmd"
-        ),
-        figures_dir = if (opts$save_figures) out("_figures"),
-        figure_format = opts$figure_format
-      )
+    # the proportions and run info are complete by now, so a failed report
+    # is a warning, not a failed run
+    tryCatch(
+      timed(
+        "report",
+        render_run_report(
+          proportions_path = out("_proportions.tsv"),
+          run_info_path = out("_run_info.json"),
+          output_path = out("_report.html"),
+          template = file.path(
+            module_dir,
+            "templates",
+            "run_report_template.Rmd"
+          ),
+          figures_dir = if (opts$save_figures) out("_figures"),
+          figure_format = opts$figure_format
+        )
+      ),
+      error = function(e) {
+        warning(
+          "Run report failed: ",
+          sub("\\.+$", "", conditionMessage(e)),
+          ". The proportions and run info are complete; re-render the ",
+          "report from them with render_run_report() in R/run_report.R.",
+          call. = FALSE
+        )
+      }
     )
   }
+}
+
+#' Command-line parameters for run info, in option order
+#'
+#' For InstaPrism, `update_mode` shows the mode actually used, including the
+#' default when it was not given.
+run_parameters <- function(method_opts) {
+  parameters <- opts[setdiff(names(opts), "help")]
+  if (opts$method == "instaprism") {
+    parameters$update_mode <- method_opts$update_mode
+  }
+  option_order <- vapply(option_list, function(o) o@dest, character(1))
+  parameters[order(match(names(parameters), unique(option_order)))]
 }
 
 #' Settings in effect that make results depend on the other bulk samples

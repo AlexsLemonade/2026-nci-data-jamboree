@@ -24,6 +24,9 @@ render_run_report <- function(
   figures_dir = NULL,
   figure_format = "png"
 ) {
+  if (!file.exists(template)) {
+    stop("Report template not found: ", template)
+  }
   if (!rmarkdown::pandoc_available()) {
     warning("pandoc not found; skipping the run report", call. = FALSE)
     return(invisible(NULL))

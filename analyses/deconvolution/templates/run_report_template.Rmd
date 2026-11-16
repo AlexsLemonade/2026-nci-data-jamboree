@@ -258,6 +258,15 @@ Bulk gene IDs were detected as **`r info$bulk$gene_id_type`**`r if (info$bulk$ge
 ```{r}
 #| label: excluded-genes
 #| results: asis
+n_markers <- info$genes$n_markers
+if (!is.null(n_markers)) {
+  cat(sprintf(
+    "<p>%s used %s marker genes (up to %d per cell type).</p>\n",
+    info$method$name,
+    fmt_n(n_markers),
+    info$parameters$n_markers
+  ))
+}
 excluded <- info$genes$excluded_genes
 categories <- info$genes$excluded_categories
 if (length(categories) == 0) {
