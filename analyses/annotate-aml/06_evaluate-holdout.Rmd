@@ -1,0 +1,482 @@
+---
+title: "Held-out evaluation of the SingleR and scANVI AML references"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: "JN Taroni"
+date: 2026
+params:
+  holdout_study: "mumme_2023"
+---
+
+## Introduction
+
+Both references were trained **without** one study (`params$holdout_study`, mumme_2023 by
+default) and then used to label that study's cells:
+
+- **SingleR:** `05_predict-holdout-singler.R`, with the `_no-<study>` trained reference.
+- **scANVI:** `05_predict-holdout-scanvi.py`, scArches query mapping with the true labels hidden.
+
+This notebook compares those predictions with the atlas labels. It only reads results, so it
+re-knits quickly; produce them with `run-holdout-eval.sh`.
+
+Things to keep in mind while reading:
+
+- mumme_2023 contains the atlas's only 10x 5′ data. The held-out models therefore saw **no**
+  5′ cells in training, so 5′ scores are a pessimistic lower bound for ScPCA SCPCP000007
+  (all 10x v2 5′). Every metric is split by assay.
+- mumme_2023 has no healthy donors.
+- "Truth" is the atlas annotation, which is itself a prediction from the atlas authors.
+- The main metrics use every cell, with SingleR's **unpruned** labels; the
+  [confidence](#confidence) section looks at pruning and probability thresholds.
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+
+holdout_study <- params$holdout_study
+
+root_dir <- rprojroot::find_root(rprojroot::has_dir(".git"))
+module_dir <- fs::path(root_dir, "analyses", "annotate-aml")
+atlas_file <- fs::path(root_dir, "data", "AML-scAtlas", "AML_scAtlas_le29.h5ad")
+holdout_dir <- fs::path(module_dir, "results", "holdout")
+singler_file <- fs::path(holdout_dir, paste0("singler_predictions_", holdout_study, ".tsv"))
+scanvi_file <- fs::path(holdout_dir, paste0("scanvi_predictions_", holdout_study, ".tsv"))
+
+stopifnot(
+  fs::file_exists(atlas_file),
+  fs::file_exists(singler_file),
+  fs::file_exists(scanvi_file)
+)
+```
+
+Plot styling: color always identifies the **method** (categorical slots 1 and 2 of the
+reference palette); assays are separate panels. Heatmaps use a single blue ramp.
+
+```{r plot-style}
+method_colors <- c(SingleR = "#2a78d6", scANVI = "#eb6834")
+ink_primary <- "#0b0b0b"
+ink_secondary <- "#52514e"
+ink_muted <- "#898781"
+grid_color <- "#e1e0d9"
+seq_blue <- c("#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b")
+
+theme_set(
+  theme_minimal(base_size = 11) +
+    theme(
+      text = element_text(color = ink_primary),
+      axis.text = element_text(color = ink_secondary),
+      axis.title = element_text(color = ink_secondary),
+      strip.text = element_text(color = ink_primary, face = "bold", hjust = 0),
+      panel.grid.major = element_line(color = grid_color, linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      legend.position = "top",
+      legend.justification = "left",
+      plot.title.position = "plot"
+    )
+)
+scale_color_method <- scale_color_manual(values = method_colors, name = "Method")
+```
+
+## Load truth and predictions
+
+True labels, assay and donor for the held-out cells, from the atlas subset (metadata only).
+
+```{r truth}
+adata <- anndataR::read_h5ad(atlas_file, as = "HDF5AnnData")
+obs <- adata$obs
+obs$cell_id <- adata$obs_names
+rm(adata)
+
+# label_fine -> label_broad map; each fine class belongs to exactly one broad class
+label_map <- obs |>
+  distinct(label_fine = as.character(label_fine), label_broad = as.character(label_broad))
+stopifnot(!anyDuplicated(label_map$label_fine))
+
+truth <- obs |>
+  filter(Study == holdout_study) |>
+  transmute(
+    cell_id,
+    donor_id = as.character(donor_id),
+    sample = as.character(Sample),
+    assay = as.character(assay),
+    true_fine = as.character(label_fine),
+    true_broad = as.character(label_broad)
+  )
+
+nrow(truth)
+count(truth, assay)
+```
+
+Predictions from both methods, in one long table (one row per cell per method).
+
+```{r predictions}
+singler <- data.table::fread(singler_file, data.table = FALSE)
+scanvi <- data.table::fread(scanvi_file, data.table = FALSE)
+
+stopifnot(
+  setequal(singler$cell_id, truth$cell_id),
+  setequal(scanvi$cell_id, truth$cell_id)
+)
+
+predictions <- bind_rows(
+  singler |> transmute(cell_id, method = "SingleR", pred_fine = singler_label),
+  scanvi |> transmute(cell_id, method = "scANVI", pred_fine = scanvi_label)
+) |>
+  left_join(label_map, by = c("pred_fine" = "label_fine")) |>
+  rename(pred_broad = label_broad) |>
+  inner_join(truth, by = "cell_id") |>
+  mutate(method = factor(method, levels = names(method_colors)))
+
+stopifnot(!anyNA(predictions$pred_broad))
+```
+
+Long format by label level, used by every metric below.
+
+```{r long-levels}
+by_level <- bind_rows(
+  predictions |> transmute(cell_id, method, assay, donor_id,
+                           level = "label_broad", truth = true_broad, pred = pred_broad),
+  predictions |> transmute(cell_id, method, assay, donor_id,
+                           level = "label_fine", truth = true_fine, pred = pred_fine)
+) |>
+  mutate(
+    level = factor(level, levels = c("label_broad", "label_fine")),
+    correct = truth == pred
+  )
+```
+
+## Metric helpers
+
+Per-label precision, recall and F1 within a group of cells. Labels are those present in the
+truth for that group; precision counts every cell predicted as the label.
+
+```{r metric-helpers}
+per_label_metrics <- function(df) {
+  labels <- unique(df$truth)
+  purrr::map(labels, \(lab) {
+    tp <- sum(df$truth == lab & df$pred == lab)
+    n_true <- sum(df$truth == lab)
+    n_pred <- sum(df$pred == lab)
+    precision <- if (n_pred > 0) tp / n_pred else NA_real_
+    recall <- tp / n_true
+    f1 <- if (is.na(precision) || precision + recall == 0) 0 else
+      2 * precision * recall / (precision + recall)
+    tibble::tibble(label = lab, n_cells = n_true, precision, recall, f1)
+  }) |>
+    purrr::list_rbind()
+}
+
+label_metrics <- by_level |>
+  group_by(method, assay, level) |>
+  group_modify(\(df, key) per_label_metrics(df)) |>
+  ungroup()
+```
+
+## Overall performance
+
+Accuracy and macro-F1 (the unweighted mean of per-label F1, so rare labels count as much as
+common ones) for each method, assay and label level.
+
+```{r overall}
+overall <- by_level |>
+  group_by(method, assay, level) |>
+  summarize(n_cells = n(), accuracy = mean(correct), .groups = "drop") |>
+  left_join(
+    label_metrics |>
+      group_by(method, assay, level) |>
+      summarize(macro_f1 = mean(f1), .groups = "drop"),
+    by = c("method", "assay", "level")
+  )
+
+overall |>
+  arrange(level, assay, method) |>
+  knitr::kable(digits = 3)
+```
+
+```{r overall-plot, fig.width = 8, fig.height = 3.5}
+overall |>
+  tidyr::pivot_longer(c(accuracy, macro_f1), names_to = "metric") |>
+  mutate(metric = recode(metric, accuracy = "Accuracy", macro_f1 = "Macro-F1")) |>
+  ggplot(aes(x = value, y = assay, color = method)) +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  facet_grid(level ~ metric) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_color_method +
+  labs(x = NULL, y = NULL, title = "Overall performance on held-out cells")
+```
+
+## Per-label performance
+
+F1 for each label, by assay. Point size shows the number of true cells in that label, so
+labels with few cells (noisy F1) are easy to spot.
+
+```{r per-label-plot-function}
+plot_per_label <- function(lvl) {
+  df <- label_metrics |> filter(level == lvl)
+  # order labels by mean F1 across methods and assays
+  label_order <- df |>
+    group_by(label) |>
+    summarize(mean_f1 = mean(f1)) |>
+    arrange(mean_f1) |>
+    pull(label)
+  df |>
+    mutate(label = factor(label, levels = label_order)) |>
+    ggplot(aes(x = f1, y = label, color = method, size = n_cells)) +
+    geom_point(alpha = 0.85) +
+    facet_wrap(~assay) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+    scale_size_area(max_size = 4, name = "True cells") +
+    scale_color_method +
+    labs(x = "F1", y = NULL, title = paste("Per-label F1:", lvl))
+}
+```
+
+```{r per-label-broad, fig.width = 9, fig.height = 5}
+plot_per_label("label_broad")
+```
+
+```{r per-label-fine, fig.width = 9, fig.height = 8}
+plot_per_label("label_fine")
+```
+
+Full per-label table:
+
+```{r per-label-table}
+label_metrics |>
+  arrange(level, label, assay, method) |>
+  knitr::kable(digits = 3)
+```
+
+## Confusion matrices
+
+Rows are true labels and are normalized to sum to 1, so each row shows where that label's
+cells went; a perfect method is a dark diagonal. Blank cells are 0. Only shares of at least
+0.2 are labeled.
+
+```{r confusion-function}
+plot_confusion <- function(df, title) {
+  label_levels <- sort(union(df$truth, df$pred))
+  df |>
+    count(method, assay, truth, pred) |>
+    group_by(method, assay, truth) |>
+    mutate(share = n / sum(n)) |>
+    ungroup() |>
+    mutate(
+      truth = factor(truth, levels = rev(label_levels)),
+      pred = factor(pred, levels = label_levels)
+    ) |>
+    ggplot(aes(x = pred, y = truth, fill = share)) +
+    geom_tile(color = "#fcfcfb", linewidth = 0.5) +
+    geom_text(
+      aes(
+        label = ifelse(share >= 0.2, sprintf("%.2f", share), ""),
+        color = share > 0.55
+      ),
+      size = 2.3,
+      show.legend = FALSE
+    ) +
+    scale_fill_gradientn(colors = seq_blue, limits = c(0, 1), name = "Share of true label") +
+    scale_color_manual(values = c(`FALSE` = ink_primary, `TRUE` = "#ffffff")) +
+    facet_grid(assay ~ method) +
+    labs(x = "Predicted label", y = "True label", title = title) +
+    theme(
+      axis.text.x = element_text(angle = 60, hjust = 1),
+      panel.grid = element_blank()
+    )
+}
+```
+
+```{r confusion-broad, fig.width = 11, fig.height = 9}
+by_level |>
+  filter(level == "label_broad") |>
+  plot_confusion("Confusion matrix: label_broad")
+```
+
+At the fine level, one figure per method keeps the 28 labels readable.
+
+```{r confusion-fine-singler, fig.width = 12, fig.height = 16}
+by_level |>
+  filter(level == "label_fine", method == "SingleR") |>
+  plot_confusion("Confusion matrix: label_fine, SingleR")
+```
+
+```{r confusion-fine-scanvi, fig.width = 12, fig.height = 16}
+by_level |>
+  filter(level == "label_fine", method == "scANVI") |>
+  plot_confusion("Confusion matrix: label_fine, scANVI")
+```
+
+## Per-donor accuracy
+
+Overall accuracy for each donor and assay, to show how much performance varies across
+donors. Donors with fewer than 100 cells in an assay are left out.
+
+```{r per-donor, fig.width = 9, fig.height = 7}
+donor_accuracy <- by_level |>
+  group_by(method, assay, level, donor_id) |>
+  summarize(n_cells = n(), accuracy = mean(correct), .groups = "drop") |>
+  filter(n_cells >= 100)
+
+donor_order <- donor_accuracy |>
+  group_by(donor_id) |>
+  summarize(mean_acc = mean(accuracy)) |>
+  arrange(mean_acc) |>
+  pull(donor_id)
+
+donor_accuracy |>
+  mutate(donor_id = factor(donor_id, levels = donor_order)) |>
+  ggplot(aes(x = accuracy, y = donor_id, color = method)) +
+  geom_point(size = 2.5) +
+  facet_grid(assay ~ level, scales = "free_y", space = "free_y") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_color_method +
+  labs(x = "Accuracy", y = NULL, title = "Accuracy by donor")
+```
+
+```{r per-donor-summary}
+donor_accuracy |>
+  group_by(method, assay, level) |>
+  summarize(
+    n_donors = n(),
+    min = min(accuracy),
+    median = median(accuracy),
+    max = max(accuracy),
+    .groups = "drop"
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+## Confidence {#confidence}
+
+### SingleR pruning
+
+SingleR prunes (sets to `NA`) assignments whose score is an outlier for that label. How many
+cells are pruned, and how accurate are the remaining labels?
+
+```{r singler-pruning}
+singler_pruning <- singler |>
+  inner_join(truth, by = "cell_id") |>
+  mutate(pruned = is.na(singler_pruned_label)) |>
+  left_join(label_map, by = c("singler_label" = "label_fine")) |>
+  rename(pred_broad = label_broad)
+
+singler_pruning |>
+  group_by(assay) |>
+  summarize(
+    n_cells = n(),
+    frac_pruned = mean(pruned),
+    acc_fine_all = mean(singler_label == true_fine),
+    acc_fine_kept = mean((singler_label == true_fine)[!pruned]),
+    acc_broad_all = mean(pred_broad == true_broad),
+    acc_broad_kept = mean((pred_broad == true_broad)[!pruned])
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+Which true labels are pruned most often?
+
+```{r singler-pruning-by-label}
+singler_pruning |>
+  group_by(assay, true_fine) |>
+  summarize(n_cells = n(), frac_pruned = mean(pruned), .groups = "drop") |>
+  arrange(desc(frac_pruned)) |>
+  head(15) |>
+  knitr::kable(digits = 3)
+```
+
+### scANVI probability threshold
+
+If we only keep scANVI predictions whose maximum probability is at least a threshold, how do
+accuracy and the fraction of cells kept change? (Two measures, so two panels.)
+
+```{r scanvi-threshold, fig.width = 9, fig.height = 6}
+scanvi_conf <- scanvi |>
+  inner_join(truth, by = "cell_id") |>
+  left_join(label_map, by = c("scanvi_label" = "label_fine")) |>
+  rename(pred_broad = label_broad)
+
+thresholds <- seq(0, 0.95, by = 0.05)
+
+threshold_curve <- purrr::map(thresholds, \(t) {
+  scanvi_conf |>
+    group_by(assay) |>
+    summarize(
+      threshold = t,
+      frac_kept = mean(scanvi_max_prob >= t),
+      label_fine = mean((scanvi_label == true_fine)[scanvi_max_prob >= t]),
+      label_broad = mean((pred_broad == true_broad)[scanvi_max_prob >= t]),
+      .groups = "drop"
+    )
+}) |>
+  purrr::list_rbind()
+
+threshold_curve |>
+  tidyr::pivot_longer(c(frac_kept, label_fine, label_broad), names_to = "measure") |>
+  mutate(
+    panel = if_else(measure == "frac_kept", "Fraction of cells kept", "Accuracy of kept cells"),
+    measure = recode(measure, frac_kept = "kept")
+  ) |>
+  ggplot(aes(x = threshold, y = value, linetype = measure)) +
+  geom_line(color = method_colors[["scANVI"]], linewidth = 0.7) +
+  facet_grid(panel ~ assay, scales = "free_y") +
+  scale_linetype_manual(
+    values = c(label_broad = "solid", label_fine = "dashed", kept = "solid"),
+    breaks = c("label_broad", "label_fine"),
+    name = "Accuracy level"
+  ) +
+  labs(x = "Minimum max-probability", y = NULL, title = "scANVI: accuracy vs. confidence threshold")
+```
+
+## Malignancy proxy
+
+The atlas's only per-cell malignancy signal is the `-like`/`LSC` HSPC sub-labels (see
+`reference.md`). How often does each method call those cells `-like`/`LSC`, and how often
+does it call other cells `-like`/`LSC`?
+
+- **Sensitivity:** share of true `-like`/`LSC` cells predicted as any `-like`/`LSC` label.
+- **False-positive rate:** share of other cells predicted as `-like`/`LSC`.
+
+```{r malignancy-proxy}
+is_malignant_like <- function(label) grepl("-like$", label) | label == "HSPC:LSC"
+
+predictions |>
+  mutate(
+    true_mal = is_malignant_like(true_fine),
+    pred_mal = is_malignant_like(pred_fine)
+  ) |>
+  group_by(method, assay) |>
+  summarize(
+    n_true_mal = sum(true_mal),
+    sensitivity = mean(pred_mal[true_mal]),
+    false_positive_rate = mean(pred_mal[!true_mal]),
+    precision = sum(pred_mal & true_mal) / sum(pred_mal),
+    .groups = "drop"
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+Where do the true `-like`/`LSC` cells go? (Rows sum to 1 within method and assay.)
+
+```{r malignancy-proxy-detail}
+predictions |>
+  filter(is_malignant_like(true_fine)) |>
+  count(method, assay, true_fine, pred_fine) |>
+  group_by(method, assay, true_fine) |>
+  mutate(share = n / sum(n)) |>
+  slice_max(share, n = 3) |>
+  ungroup() |>
+  arrange(true_fine, assay, method, desc(share)) |>
+  knitr::kable(digits = 3)
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
