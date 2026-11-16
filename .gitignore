@@ -5,8 +5,11 @@
 # local scratch directory for working with Claude Code
 .workspace
 
-# root data directory
-/data/
+# Track .gitkeep files in data only
+data/**
+!data/**/
+!data/**/.gitkeep
+
 # standard results directories (keep the readme)
 /analyses/*/results/*
 !/analyses/*/results/README.md
