@@ -53,33 +53,17 @@ stopifnot(
   fs::file_exists(singler_file),
   fs::file_exists(scanvi_file)
 )
+
+# Plot style, metric and plotting functions shared with 07_compare-bonemarrowmap-holdout.Rmd
+source(fs::path(module_dir, "utils", "eval-helpers.R"))
 ```
 
 Plot styling: color always identifies the **method** (categorical slots 1 and 2 of the
 reference palette); assays are separate panels. Heatmaps use a single blue ramp.
 
 ```{r plot-style}
-method_colors <- c(SingleR = "#2a78d6", scANVI = "#eb6834")
-ink_primary <- "#0b0b0b"
-ink_secondary <- "#52514e"
-ink_muted <- "#898781"
-grid_color <- "#e1e0d9"
-seq_blue <- c("#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b")
-
-theme_set(
-  theme_minimal(base_size = 11) +
-    theme(
-      text = element_text(color = ink_primary),
-      axis.text = element_text(color = ink_secondary),
-      axis.title = element_text(color = ink_secondary),
-      strip.text = element_text(color = ink_primary, face = "bold", hjust = 0),
-      panel.grid.major = element_line(color = grid_color, linewidth = 0.3),
-      panel.grid.minor = element_blank(),
-      legend.position = "top",
-      legend.justification = "left",
-      plot.title.position = "plot"
-    )
-)
+method_colors <- method_colors_all[c("SingleR", "scANVI")]
+theme_set(eval_theme())
 scale_color_method <- scale_color_manual(values = method_colors, name = "Method")
 ```
 
@@ -157,21 +141,7 @@ Per-label precision, recall and F1 within a group of cells. Labels are those pre
 truth for that group; precision counts every cell predicted as the label.
 
 ```{r metric-helpers}
-per_label_metrics <- function(df) {
-  labels <- unique(df$truth)
-  purrr::map(labels, \(lab) {
-    tp <- sum(df$truth == lab & df$pred == lab)
-    n_true <- sum(df$truth == lab)
-    n_pred <- sum(df$pred == lab)
-    precision <- if (n_pred > 0) tp / n_pred else NA_real_
-    recall <- tp / n_true
-    f1 <- if (is.na(precision) || precision + recall == 0) 0 else
-      2 * precision * recall / (precision + recall)
-    tibble::tibble(label = lab, n_cells = n_true, precision, recall, f1)
-  }) |>
-    purrr::list_rbind()
-}
-
+# per_label_metrics() is defined in utils/eval-helpers.R
 label_metrics <- by_level |>
   group_by(method, assay, level) |>
   group_modify(\(df, key) per_label_metrics(df)) |>
@@ -184,15 +154,7 @@ Accuracy and macro-F1 (the unweighted mean of per-label F1, so rare labels count
 common ones) for each method, assay and label level.
 
 ```{r overall}
-overall <- by_level |>
-  group_by(method, assay, level) |>
-  summarize(n_cells = n(), accuracy = mean(correct), .groups = "drop") |>
-  left_join(
-    label_metrics |>
-      group_by(method, assay, level) |>
-      summarize(macro_f1 = mean(f1), .groups = "drop"),
-    by = c("method", "assay", "level")
-  )
+overall <- overall_metrics(by_level, label_metrics)
 
 overall |>
   arrange(level, assay, method) |>
@@ -216,33 +178,12 @@ overall |>
 F1 for each label, by assay. Point size shows the number of true cells in that label, so
 labels with few cells (noisy F1) are easy to spot.
 
-```{r per-label-plot-function}
-plot_per_label <- function(lvl) {
-  df <- label_metrics |> filter(level == lvl)
-  # order labels by mean F1 across methods and assays
-  label_order <- df |>
-    group_by(label) |>
-    summarize(mean_f1 = mean(f1)) |>
-    arrange(mean_f1) |>
-    pull(label)
-  df |>
-    mutate(label = factor(label, levels = label_order)) |>
-    ggplot(aes(x = f1, y = label, color = method, size = n_cells)) +
-    geom_point(alpha = 0.85) +
-    facet_wrap(~assay) +
-    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
-    scale_size_area(max_size = 4, name = "True cells") +
-    scale_color_method +
-    labs(x = "F1", y = NULL, title = paste("Per-label F1:", lvl))
-}
-```
-
 ```{r per-label-broad, fig.width = 9, fig.height = 5}
-plot_per_label("label_broad")
+plot_per_label(label_metrics, "label_broad", scale_color_method)
 ```
 
 ```{r per-label-fine, fig.width = 9, fig.height = 8}
-plot_per_label("label_fine")
+plot_per_label(label_metrics, "label_fine", scale_color_method)
 ```
 
 Full per-label table:
@@ -258,39 +199,6 @@ label_metrics |>
 Rows are true labels and are normalized to sum to 1, so each row shows where that label's
 cells went; a perfect method is a dark diagonal. Blank cells are 0. Only shares of at least
 0.2 are labeled.
-
-```{r confusion-function}
-plot_confusion <- function(df, title) {
-  label_levels <- sort(union(df$truth, df$pred))
-  df |>
-    count(method, assay, truth, pred) |>
-    group_by(method, assay, truth) |>
-    mutate(share = n / sum(n)) |>
-    ungroup() |>
-    mutate(
-      truth = factor(truth, levels = rev(label_levels)),
-      pred = factor(pred, levels = label_levels)
-    ) |>
-    ggplot(aes(x = pred, y = truth, fill = share)) +
-    geom_tile(color = "#fcfcfb", linewidth = 0.5) +
-    geom_text(
-      aes(
-        label = ifelse(share >= 0.2, sprintf("%.2f", share), ""),
-        color = share > 0.55
-      ),
-      size = 2.3,
-      show.legend = FALSE
-    ) +
-    scale_fill_gradientn(colors = seq_blue, limits = c(0, 1), name = "Share of true label") +
-    scale_color_manual(values = c(`FALSE` = ink_primary, `TRUE` = "#ffffff")) +
-    facet_grid(assay ~ method) +
-    labs(x = "Predicted label", y = "True label", title = title) +
-    theme(
-      axis.text.x = element_text(angle = 60, hjust = 1),
-      panel.grid = element_blank()
-    )
-}
-```
 
 ```{r confusion-broad, fig.width = 11, fig.height = 9}
 by_level |>
