@@ -89,6 +89,10 @@ InstaPrism can update the reference to fit the bulk data, and the update is repo
 
 Without `--malignant-cell-type`, the update runs only in `pooled` mode.
 
+The per-sample malignant update can go wrong when a bulk sample has few malignant cells: the flexible malignant profile absorbs normal cell types and inflates the malignant proportion.
+In `all` and `malignant` modes, the run warns and lists the bulk samples whose initial malignant proportion is below 0.1.
+For those samples, prefer the initial `instaprism` fit.
+
 ### Results that depend on the whole run
 
 Some settings make one bulk sample's estimates depend on the other samples in the same run:

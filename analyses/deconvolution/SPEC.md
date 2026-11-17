@@ -235,6 +235,7 @@ Options for one method only are explicit options named with that method's prefix
     - **Cell-state level, `malignant` mode only:** rows for the normal cell types only. The malignant cell type has no updated cell-state breakdown, so these rows are partial and don't sum to 1.
     - `all` and `pooled` modes have no cell-state rows.
   - Updated cell types lose their cell-state proportions, so cell-state proportions for updated types come from the initial fit.
+  - **Warn on a low initial malignant proportion** (`all` and `malignant` modes): list the bulk samples whose initial malignant proportion is below 0.1. When malignant cells are scarce, the per-sample malignant profile can absorb normal cell types; on AML scAtlas pseudo-bulk, such samples (healthy donors included) went from below 0.1 to 0.2–0.9 after the update. The warning recommends the initial fit for those samples.
   - **Pass the identical bulk matrix**, same columns in the same order, to both calls. The update matches bulk samples **by column position**, so a reordered or subset matrix runs silently with wrong results.
   - **Look up `@theta` rows by name, not position.** The malignant cell type comes first, and levels are mixed.
 - **Never split bulk samples across calls.** `--update-mode all`, `--update-mode pooled` and `--instaprism-filter` all make results depend on which bulk samples share the run.
@@ -315,6 +316,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - rounding;
    - duplicate IDs;
    - low gene overlap;
+   - low initial malignant proportion before a reference update;
    - **small bulk sets** (fewer than ~10 bulk samples), where InstaPrism's `filter` lets a single sample decide which genes are dropped.
 3. **Batch-dependent settings** active in this run (`--update-mode all` or `pooled`, `--instaprism-filter`), with a one-line reason each and a link to the bulk sample list.
 4. **Proportions**:

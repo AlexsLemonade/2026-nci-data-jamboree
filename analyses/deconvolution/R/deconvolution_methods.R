@@ -17,6 +17,10 @@
 #   object      = the method's raw result, for --save-method-objects
 # ). deconvolve.R adds the `reference` column to `proportions`.
 
+# Initial malignant proportion below which InstaPrism's reference update is
+# flagged (see warn_low_malignant())
+LOW_MALIGNANT_PROPORTION <- 0.1
+
 #' The method registry
 #'
 #' For each method: the function that runs it, its options and defaults, the
@@ -207,6 +211,10 @@ run_instaprism <- function(reference, bulk, options) {
   )
   object <- list(initial = fit)
 
+  if (run_update && !pooled) {
+    warn_low_malignant(fit@Post.ini.ct@theta, malignant)
+  }
+
   if (run_update) {
     update_method <- paste0("instaprism_update_", options$update_mode)
     # the update matches bulk samples by column position: pass the same matrix
@@ -252,6 +260,46 @@ run_instaprism <- function(reference, bulk, options) {
     info = info,
     object = object
   )
+}
+
+#' Warn about bulk samples with a low initial malignant proportion
+#'
+#' The update re-estimates the malignant profile for each bulk sample. When a
+#' sample has few malignant cells, that flexible profile can absorb signal from
+#' normal cell types, so the updated malignant proportion tends to be inflated.
+#' On pseudo-bulk from the AML scAtlas, samples with an initial malignant
+#' proportion below 0.1 (including healthy donors) were given 0.2 to 0.9 after
+#' the update.
+#'
+#' @param theta Initial cell-type proportions, cell types x bulk samples.
+#' @param malignant The malignant cell type.
+warn_low_malignant <- function(theta, malignant) {
+  initial <- theta[malignant, ]
+  low <- names(initial)[initial < LOW_MALIGNANT_PROPORTION]
+  if (length(low) == 0) {
+    return(invisible(low))
+  }
+  shown <- paste(utils::head(low, 5), collapse = ", ")
+  if (length(low) > 5) {
+    shown <- paste0(shown, ", ...")
+  }
+  warning(
+    "Initial '",
+    malignant,
+    "' proportion is below ",
+    LOW_MALIGNANT_PROPORTION,
+    " in ",
+    length(low),
+    " of ",
+    length(initial),
+    " bulk samples (",
+    shown,
+    "). With few malignant cells, updating the reference will likely ",
+    "increase error: the per-sample malignant profile can absorb normal ",
+    "cell types. Prefer the initial fit ('instaprism') for these samples.",
+    call. = FALSE
+  )
+  invisible(low)
 }
 
 #' Evaluate an expression, discarding what it prints to stdout
