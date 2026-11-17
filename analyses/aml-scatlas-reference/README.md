@@ -56,3 +56,31 @@ The result has 21,588 genes, 16 cell types and 22 cell states, covering 744,176 
 
 The source keeps only 21,588 genes, so a typical bulk matrix of about 60k genes shares only about a third of its genes with this reference.
 That's fine: `deconvolve.R` measures overlap against the smaller gene set, here the reference's genes, and 99.7% of them are in Ensembl 104.
+
+## Reference performance
+
+For a rough check of reference performance, it was run through `deconvolve.R` (InstaPrism, `--malignant-cell-type Malignant`).
+The bulk data was pseudo-bulk: 12 of the reference samples (8 AML, 4 healthy), summed over all 60,664 Ensembl 104 genes.
+Estimates were compared with each sample's true cell-type fractions:
+
+| Fit | All cell types: r / RMSE | Malignant only: r / RMSE |
+| --- | --- | --- |
+| `instaprism` (initial fit) | 0.87 / 0.073 | 0.97 / 0.095 |
+| `instaprism_update_all` | 0.55 / 0.141 | 0.63 / 0.381 |
+| `instaprism_update_malignant` | 0.41 / 0.174 | 0.56 / 0.550 |
+
+Both reference updates **over-call Malignant**.
+Healthy donors got 0.2–0.45 after the update, and AML samples whose true malignant fraction is under 3% got up to 0.87.
+The likely cause is the label limitation above: the malignant profile and the normal HSPC/GMP/CMP profiles overlap, so the per-sample malignant profile absorbs normal cells.
+Because of this, `deconvolve.R` now warns before an `all` or `malignant` update about bulk samples whose initial malignant proportion is below 0.1.
+Use the initial fit for those samples.
+
+Caveats on this test: the pseudo-bulk samples are part of the reference, which flatters the initial fit.
+The comparison also sets estimated mRNA shares against true cell fractions.
+And the "true" malignant fraction undercounts leukaemic cells that carry normal labels.
+The healthy-donor results don't depend on any of these.
+
+## Possible follow-ups
+
+- **Held-out evaluation:** build the reference without about 20 AML samples, then deconvolve pseudo-bulk made from them.
+- **Normal profiles from healthy donors only:** build normal cell types only from healthy-donor cells, so leukaemic cells can't contaminate them. Cells from AML donors that the authors didn't call malignant are either dropped or added to `Malignant`.
