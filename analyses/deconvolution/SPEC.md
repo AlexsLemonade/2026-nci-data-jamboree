@@ -61,7 +61,7 @@ analyses/deconvolution/
 │   └── run_report.R                  # run report rendering and figure functions
 ├── templates/run_report_template.Rmd
 ├── reference-files/gene_categories.tsv
-├── scripts/download_ensembl_gtf.sh  # downloads the Ensembl GTF to data/references/ (git-ignored)
+├── scripts/download_ensembl_gtf.sh  # downloads the Ensembl GTF to data/genome-references/ (git-ignored)
 ├── scripts/make_gene_categories.R   # one-off generator for the gene category table, using Bioc.gff
 └── README.md
 ```
@@ -271,7 +271,7 @@ Uses the claude-science rule. For each label at the fitted level, take the top `
 - **Your own table:** `--gene-categories` replaces the default table with a user's own, with any categories.
 - **Matching:** on Ensembl ID first, falling back to symbol when the bulk is keyed by symbol.
 
-**Default table:** `reference-files/gene_categories.tsv`. `scripts/download_ensembl_gtf.sh` downloads the Ensembl 104 (GRCh38) GTF, the annotation ScPCA uses, to `data/references/` at the repository root (git-ignored) and verifies its checksum. `scripts/make_gene_categories.R` then reads it with `Bioc.gff::readGFF()` and generates the table. It's needed because ScPCA gene metadata has no biotype or chromosome.
+**Default table:** `reference-files/gene_categories.tsv`. `scripts/download_ensembl_gtf.sh` downloads the Ensembl 104 (GRCh38) GTF, the annotation ScPCA uses, to `data/genome-references/` at the repository root (git-ignored) and verifies its checksum. `scripts/make_gene_categories.R` then reads it with `Bioc.gff::readGFF()` and generates the table. It's needed because ScPCA gene metadata has no biotype or chromosome.
 
 | Category | Contents | Excluded by default |
 |---|---|---|

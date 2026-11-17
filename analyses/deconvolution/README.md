@@ -132,7 +132,7 @@ You can supply your own table, with any categories, through `--gene-categories`.
 To regenerate the default table:
 
 ```bash
-bash scripts/download_ensembl_gtf.sh      # to data/references/ at the repository root (git-ignored)
+bash scripts/download_ensembl_gtf.sh      # to data/genome-references/ at the repository root (git-ignored)
 Rscript scripts/make_gene_categories.R
 ```
 
