@@ -35,7 +35,7 @@ option_list <- list(
     default = file.path(
       repo_root,
       "data",
-      "references",
+      "genome-references",
       "Homo_sapiens.GRCh38.104.gtf.gz"
     ),
     help = "Ensembl GTF (gzipped) [default: %default]"

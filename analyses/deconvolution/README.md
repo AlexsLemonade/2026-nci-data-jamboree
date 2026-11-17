@@ -63,7 +63,7 @@ Use counts (e.g. salmon estimated counts), not TPM.
 **What happens:**
 
 1. Reference profiles are pooled across reference samples, and labels with fewer than `--min-cells` cells are dropped.
-2. Bulk genes are matched to the reference. The run warns if fewer than 80% of bulk genes match, and stops below `--min-gene-overlap` (default 0.5).
+2. Bulk genes are matched to the reference. Overlap is measured against the smaller of the two gene sets, so a filtered reference or bulk matrix is fine. The run warns if less than 80% of the smaller set is shared, and stops below `--min-gene-overlap` (default 0.5).
 3. Gene categories from `reference-files/gene_categories.tsv` are excluded: by default mitochondrial, ribosomal and sex-linked genes (`--exclude-gene-categories`; also available: `hemoglobin`, `non_coding`; `none` turns it off).
 4. The method runs, and the outputs and report are written.
 
@@ -88,6 +88,10 @@ InstaPrism can update the reference to fit the bulk data, and the update is repo
 | `pooled`        | no                             | every profile once, pooled across the run                                      | `instaprism_update_pooled`    |
 
 Without `--malignant-cell-type`, the update runs only in `pooled` mode.
+
+The per-sample malignant update can go wrong when a bulk sample has few malignant cells: the flexible malignant profile absorbs normal cell types and inflates the malignant proportion.
+In `all` and `malignant` modes, the run warns and lists the bulk samples whose initial malignant proportion is below 0.1.
+For those samples, prefer the initial `instaprism` fit.
 
 ### Results that depend on the whole run
 
@@ -132,7 +136,7 @@ You can supply your own table, with any categories, through `--gene-categories`.
 To regenerate the default table:
 
 ```bash
-bash scripts/download_ensembl_gtf.sh      # to data/references/ at the repository root (git-ignored)
+bash scripts/download_ensembl_gtf.sh      # to data/genome-references/ at the repository root (git-ignored)
 Rscript scripts/make_gene_categories.R
 ```
 

@@ -3,8 +3,9 @@
 # category table (see make_gene_categories.R). Ensembl 104 matches the
 # annotation used by ScPCA.
 #
-# Writes data/references/Homo_sapiens.GRCh38.<release>.gtf.gz at the repository
-# root (git-ignored) and verifies it against Ensembl's published checksum.
+# Writes data/genome-references/Homo_sapiens.GRCh38.<release>.gtf.gz at the
+# repository root (git-ignored) and verifies it against Ensembl's published
+# checksum.
 #
 # Usage: bash download_ensembl_gtf.sh [release]   (default release: 104)
 
@@ -15,7 +16,7 @@ gtf="Homo_sapiens.GRCh38.${release}.gtf.gz"
 base_url="https://ftp.ensembl.org/pub/release-${release}/gtf/homo_sapiens"
 
 repo_root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-out_dir="${repo_root}/data/references"
+out_dir="${repo_root}/data/genome-references"
 mkdir -p "${out_dir}"
 
 if [[ -f "${out_dir}/${gtf}" ]]; then

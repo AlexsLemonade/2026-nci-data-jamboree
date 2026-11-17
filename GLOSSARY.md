@@ -6,6 +6,10 @@
 Labelled single-cell data, summarised per cell type (and optionally cell state), used to estimate the composition of bulk samples.
 _Avoid_: signature matrix (a reference may be richer than one), atlas
 
+**Reference source**
+A published labelled single-cell dataset, often an integrated atlas, from which one or more references are built. Several references (e.g. different subsets or label choices) can come from one reference source.
+_Avoid_: atlas (unqualified), reference (for the source data itself)
+
 **Reference sample**
 A single-cell sample whose cells contribute to a reference; several sequencing libraries from the same sample count as one reference sample. Distinct from a bulk sample.
 _Avoid_: donor, subject, library, sample (unqualified)

@@ -1,0 +1,15 @@
+[project]
+name = "aml-scatlas-reference"
+version = "0.1.0"
+description = "Prepare the AML scAtlas as input for analyses/deconvolution/build_reference.R"
+requires-python = ">=3.12"
+dependencies = [
+    "anndata",
+    "h5py",
+    "numpy",
+    "pandas",
+    "scipy",
+]
+
+[tool.uv]
+package = false

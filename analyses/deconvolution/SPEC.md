@@ -61,7 +61,7 @@ analyses/deconvolution/
 │   └── run_report.R                  # run report rendering and figure functions
 ├── templates/run_report_template.Rmd
 ├── reference-files/gene_categories.tsv
-├── scripts/download_ensembl_gtf.sh  # downloads the Ensembl GTF to data/references/ (git-ignored)
+├── scripts/download_ensembl_gtf.sh  # downloads the Ensembl GTF to data/genome-references/ (git-ignored)
 ├── scripts/make_gene_categories.R   # one-off generator for the gene category table, using Bioc.gff
 └── README.md
 ```
@@ -184,7 +184,7 @@ Pooled profiles per cell type or cell state are not stored. `deconvolve.R` compu
 | `--instaprism-filter` / `--no-instaprism-filter` | on | InstaPrism's outlier-gene filter |
 | `--exclude-gene-categories` | `mitochondrial,ribosomal,sex` | Categories from the gene category table to exclude; `none` disables |
 | `--gene-categories` | `reference-files/gene_categories.tsv` | Gene category table to use |
-| `--min-gene-overlap` | `0.5` | Fail if fewer than this fraction of bulk genes match the reference |
+| `--min-gene-overlap` | `0.5` | Fail if less than this fraction of the smaller gene set (bulk or reference) is shared |
 | `--n-markers` | `60` | Markers per label, for methods that need markers |
 | `--n-cores` | `1` | Passed to InstaPrism (`n.core`); does not change results |
 | `--seed` | `2026` | |
@@ -214,8 +214,9 @@ Options for one method only are explicit options named with that method's prefix
 - Match bulk IDs against the reference's `gene_id` (Ensembl) or `gene_symbol`, according to the detected bulk ID type.
 - When matching by symbol, **drop reference genes with an `NA` symbol** (about 20,000 in ScPCA), then sum duplicate reference symbols, with a warning.
 - Intersect reference and bulk genes, and report how many genes were lost.
-- Fail if the matched fraction of bulk genes is below `--min-gene-overlap`.
-- Warn if the matched fraction is below 0.8 (low gene overlap), so the report flags it.
+- Measure overlap as the shared fraction of the **smaller** gene set, bulk or reference. A filtered reference (e.g. an atlas that kept only detected genes) or a filtered bulk matrix (e.g. protein-coding only) then still passes, while mismatched IDs or species fail.
+- Fail if the overlap is below `--min-gene-overlap`.
+- Warn if the overlap is below 0.8 (low gene overlap), so the report flags it.
 - No other filtering happens here.
 
 **5. Exclude gene categories** (§8). This runs after intersection and before InstaPrism's `filter`, and applies whatever the method, including to marker selection.
@@ -234,6 +235,7 @@ Options for one method only are explicit options named with that method's prefix
     - **Cell-state level, `malignant` mode only:** rows for the normal cell types only. The malignant cell type has no updated cell-state breakdown, so these rows are partial and don't sum to 1.
     - `all` and `pooled` modes have no cell-state rows.
   - Updated cell types lose their cell-state proportions, so cell-state proportions for updated types come from the initial fit.
+  - **Warn on a low initial malignant proportion** (`all` and `malignant` modes): list the bulk samples whose initial malignant proportion is below 0.1. When malignant cells are scarce, the per-sample malignant profile can absorb normal cell types; on AML scAtlas pseudo-bulk, such samples (healthy donors included) went from below 0.1 to 0.2–0.9 after the update. The warning recommends the initial fit for those samples.
   - **Pass the identical bulk matrix**, same columns in the same order, to both calls. The update matches bulk samples **by column position**, so a reordered or subset matrix runs silently with wrong results.
   - **Look up `@theta` rows by name, not position.** The malignant cell type comes first, and levels are mixed.
 - **Never split bulk samples across calls.** `--update-mode all`, `--update-mode pooled` and `--instaprism-filter` all make results depend on which bulk samples share the run.
@@ -271,7 +273,7 @@ Uses the claude-science rule. For each label at the fitted level, take the top `
 - **Your own table:** `--gene-categories` replaces the default table with a user's own, with any categories.
 - **Matching:** on Ensembl ID first, falling back to symbol when the bulk is keyed by symbol.
 
-**Default table:** `reference-files/gene_categories.tsv`. `scripts/download_ensembl_gtf.sh` downloads the Ensembl 104 (GRCh38) GTF, the annotation ScPCA uses, to `data/references/` at the repository root (git-ignored) and verifies its checksum. `scripts/make_gene_categories.R` then reads it with `Bioc.gff::readGFF()` and generates the table. It's needed because ScPCA gene metadata has no biotype or chromosome.
+**Default table:** `reference-files/gene_categories.tsv`. `scripts/download_ensembl_gtf.sh` downloads the Ensembl 104 (GRCh38) GTF, the annotation ScPCA uses, to `data/genome-references/` at the repository root (git-ignored) and verifies its checksum. `scripts/make_gene_categories.R` then reads it with `Bioc.gff::readGFF()` and generates the table. It's needed because ScPCA gene metadata has no biotype or chromosome.
 
 | Category | Contents | Excluded by default |
 |---|---|---|
@@ -314,6 +316,7 @@ All files are written to `--output-dir` and start with `--output-prefix`:
    - rounding;
    - duplicate IDs;
    - low gene overlap;
+   - low initial malignant proportion before a reference update;
    - **small bulk sets** (fewer than ~10 bulk samples), where InstaPrism's `filter` lets a single sample decide which genes are dropped.
 3. **Batch-dependent settings** active in this run (`--update-mode all` or `pooled`, `--instaprism-filter`), with a one-line reason each and a link to the bulk sample list.
 4. **Proportions**:

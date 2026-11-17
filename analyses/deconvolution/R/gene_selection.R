@@ -17,9 +17,14 @@
 #'
 #' @param profiles Output of prepare_profiles().
 #' @param bulk Output of read_bulk_matrix().
-#' @param min_gene_overlap Fail if fewer than this fraction of bulk genes
-#'   match the reference.
-#' @param warn_gene_overlap Warn if fewer than this fraction match (but at
+#' The overlap is the shared fraction of the smaller gene set (bulk or
+#' reference), so a filtered reference (e.g. an atlas that kept only detected
+#' genes) and a filtered bulk matrix (e.g. protein-coding only) both pass, while
+#' mismatched gene IDs or species fail.
+#'
+#' @param min_gene_overlap Fail if less than this fraction of the smaller gene
+#'   set is shared.
+#' @param warn_gene_overlap Warn if less than this fraction is shared (but at
 #'   least `min_gene_overlap`).
 #' @return A harmonised genes object (see top of file) plus `funnel`, a list
 #'   of gene counts: `bulk`, `reference`, `shared`.
@@ -45,26 +50,37 @@ harmonise_genes <- function(
   shared <- rownames(bulk_counts)[
     rownames(bulk_counts) %in% rownames(reference)
   ]
-  overlap <- length(shared) / nrow(bulk_counts)
+  smaller <- if (nrow(bulk_counts) <= nrow(reference)) "bulk" else "reference"
+  n_smaller <- min(nrow(bulk_counts), nrow(reference))
+  overlap <- length(shared) / n_smaller
+  pct <- function(n, total) sprintf("%.1f%%", 100 * n / total)
   message(
     length(shared),
+    " genes shared by ",
+    if (gene_id_type == "ensembl") "Ensembl ID" else "symbol",
+    ": ",
+    pct(length(shared), nrow(bulk_counts)),
     " of ",
     nrow(bulk_counts),
-    " bulk genes (",
-    sprintf("%.1f%%", 100 * overlap),
-    ") match the reference by ",
-    if (gene_id_type == "ensembl") "Ensembl ID" else "symbol",
-    "; ",
-    nrow(bulk_counts) - length(shared),
-    " bulk and ",
-    nrow(reference) - length(shared),
-    " reference genes are not shared"
+    " bulk genes and ",
+    pct(length(shared), nrow(reference)),
+    " of ",
+    nrow(reference),
+    " reference genes"
+  )
+  overlap_text <- paste0(
+    pct(length(shared), n_smaller),
+    " of the ",
+    n_smaller,
+    " ",
+    smaller,
+    " genes (the smaller set) are shared"
   )
   if (overlap < min_gene_overlap) {
     stop(
       "Only ",
-      sprintf("%.1f%%", 100 * overlap),
-      " of bulk genes match the reference (--min-gene-overlap ",
+      overlap_text,
+      " (--min-gene-overlap ",
       min_gene_overlap,
       "). Check that the bulk and reference use the same gene IDs and species.",
       call. = FALSE
@@ -73,12 +89,8 @@ harmonise_genes <- function(
   if (overlap < warn_gene_overlap) {
     warning(
       "Low gene overlap: only ",
-      sprintf("%.1f%%", 100 * overlap),
-      " of bulk genes match the reference (",
-      length(shared),
-      " of ",
-      nrow(bulk_counts),
-      "). Check that the bulk and reference use the same annotation.",
+      overlap_text,
+      ". Check that the bulk and reference use the same annotation.",
       call. = FALSE
     )
   }
