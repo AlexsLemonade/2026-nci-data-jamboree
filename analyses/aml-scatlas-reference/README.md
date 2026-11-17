@@ -41,8 +41,18 @@ bash scripts/download_aml_scatlas.sh
 
 # 2. Split it into one h5ad per reference sample, with label columns, in data/aml-scatlas/samples/
 uv run python scripts/split_by_sample.py
+
+# 3. Build the reference with analyses/deconvolution/build_reference.R, to data/references/aml-scatlas.rds
+bash scripts/build_aml_scatlas_reference.sh
 ```
 
 Step 2 writes `samples.tsv`, which lists each file with its cell and malignant-cell counts.
 The output files hold raw counts in `X` and Ensembl IDs with a `gene_symbol` column in `var`.
 They add two label columns, `deconv_cell_type` and `deconv_cell_state`.
+
+Step 3 needs the deconvolution module's R environment (see its README).
+Building from all 199 reference samples took about 3 minutes, with a peak of about 10 GB of memory.
+The result has 21,588 genes, 16 cell types and 22 cell states, covering 744,176 cells.
+
+Because the source keeps only 21,588 genes, a typical bulk matrix of about 60k genes matches less than half of its genes to this reference.
+`deconvolve.R` currently stops when fewer than `--min-gene-overlap` (default 0.5) of the bulk genes match.
