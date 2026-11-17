@@ -128,3 +128,77 @@ plot_confusion <- function(df, title) {
       panel.grid = ggplot2::element_blank()
     )
 }
+
+# Agreement without shared labels --------------------------------------------------------------
+# Both take two label vectors of the same length (any label sets; NA not allowed) and use
+# doubles throughout so large counts don't overflow.
+
+# Adjusted Rand index (Hubert & Arabie 1985): 1 = same partition, ~0 = chance agreement.
+adjusted_rand_index <- function(x, y) {
+  stopifnot(length(x) == length(y), !anyNA(x), !anyNA(y))
+  tab <- table(x, y)
+  choose2 <- function(n) n * (n - 1) / 2
+  sum_ij <- sum(choose2(as.numeric(tab)))
+  sum_a <- sum(choose2(as.numeric(rowSums(tab))))
+  sum_b <- sum(choose2(as.numeric(colSums(tab))))
+  expected <- sum_a * sum_b / choose2(as.numeric(length(x)))
+  max_index <- (sum_a + sum_b) / 2
+  if (max_index == expected) return(NA_real_)
+  (sum_ij - expected) / (max_index - expected)
+}
+
+# Normalized mutual information, 2 * I(x; y) / (H(x) + H(y)) (as in igraph::compare(method =
+# "nmi")): 1 = same partition, 0 = independent.
+normalized_mutual_info <- function(x, y) {
+  stopifnot(length(x) == length(y), !anyNA(x), !anyNA(y))
+  p_xy <- as.numeric(table(x, y)) / length(x)
+  p_x <- as.numeric(table(x)) / length(x)
+  p_y <- as.numeric(table(y)) / length(y)
+  entropy <- function(p) -sum(p[p > 0] * log(p[p > 0]))
+  h_x <- entropy(p_x)
+  h_y <- entropy(p_y)
+  if (h_x + h_y == 0) return(NA_real_)
+  mutual_info <- h_x + h_y - entropy(p_xy)
+  2 * mutual_info / (h_x + h_y)
+}
+
+# Cross-tab heatmap for two labelings that don't share labels (unlike plot_confusion()).
+# `df` needs `row`, `col` and `assay` columns. Each row is normalized to sum to 1 within an
+# assay, so it shows where that row label's cells went. `row_levels`/`col_levels` set the order
+# (top to bottom, left to right); by default they're sorted. Only shares >= 0.2 are labeled.
+plot_crosstab <- function(df, title, row_title, col_title,
+                          row_levels = NULL, col_levels = NULL) {
+  if (is.null(row_levels)) row_levels <- sort(unique(df$row))
+  if (is.null(col_levels)) col_levels <- sort(unique(df$col))
+  df |>
+    dplyr::count(assay, row, col) |>
+    dplyr::group_by(assay, row) |>
+    dplyr::mutate(share = n / sum(n)) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(
+      row = factor(row, levels = rev(row_levels)),
+      col = factor(col, levels = col_levels)
+    ) |>
+    ggplot2::ggplot(ggplot2::aes(x = col, y = row, fill = share)) +
+    ggplot2::geom_tile(color = "#fcfcfb", linewidth = 0.5) +
+    ggplot2::geom_text(
+      ggplot2::aes(
+        label = ifelse(share >= 0.2, sprintf("%.2f", share), ""),
+        color = share > 0.55
+      ),
+      size = 2.3,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colors = seq_blue, limits = c(0, 1), name = "Share of row label"
+    ) +
+    ggplot2::scale_color_manual(values = c(`FALSE` = ink_primary, `TRUE` = "#ffffff")) +
+    ggplot2::scale_x_discrete(drop = FALSE) +
+    ggplot2::scale_y_discrete(drop = FALSE) +
+    ggplot2::facet_wrap(~assay, ncol = 1) +
+    ggplot2::labs(x = col_title, y = row_title, title = title) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 60, hjust = 1),
+      panel.grid = ggplot2::element_blank()
+    )
+}
