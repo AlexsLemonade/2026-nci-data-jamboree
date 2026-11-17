@@ -13,7 +13,7 @@ The input file is never loaded into memory in full: obs is read on its own, and 
 rows of `raw/X` are read from disk.
 
 Run from anywhere with:
-  uv run --project analyses/annotate-aml python analyses/annotate-aml/02_subset-atlas.py
+  uv run --project analyses/annotate-aml python analyses/annotate-aml/01_subset-atlas.py
 """
 
 import argparse

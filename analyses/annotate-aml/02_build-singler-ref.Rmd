@@ -13,7 +13,7 @@ params:
 ## Introduction
 
 This notebook builds a SingleR reference from the age-filtered AML scAtlas subset written by
-`02_subset-atlas.py` (`data/AML-scAtlas/AML_scAtlas_le29.h5ad`).
+`01_subset-atlas.py` (`data/AML-scAtlas/AML_scAtlas_le29.h5ad`).
 
 - Labels: `label_fine` (predictions can be collapsed to `label_broad` afterwards; every
   `label_fine` class maps to exactly one `label_broad` class).
@@ -28,9 +28,9 @@ This notebook builds a SingleR reference from the age-filtered AML scAtlas subse
 
   ```r
   rmarkdown::render(
-    "03_build-singler-ref.Rmd",
+    "02_build-singler-ref.Rmd",
     params = list(holdout_study = "mumme_2023"),
-    output_file = "03_build-singler-ref_no-mumme_2023.nb.html"
+    output_file = "02_build-singler-ref_no-mumme_2023.nb.html"
   )
   ```
 

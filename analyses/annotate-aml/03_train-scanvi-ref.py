@@ -15,11 +15,11 @@ Query mapping later (scArches):
   then a short fine-tune with `train(max_epochs=..., plan_kwargs={"weight_decay": 0.0})`.
 
 Run from anywhere with:
-  uv run --project analyses/annotate-aml python analyses/annotate-aml/04_train-scanvi-ref.py
+  uv run --project analyses/annotate-aml python analyses/annotate-aml/03_train-scanvi-ref.py
 
 For validation (step 4), leave one study out; outputs go to `scanvi_ref_no-<study>/` so the
 full reference isn't overwritten:
-  uv run --project analyses/annotate-aml python analyses/annotate-aml/04_train-scanvi-ref.py \
+  uv run --project analyses/annotate-aml python analyses/annotate-aml/03_train-scanvi-ref.py \
     --holdout-study mumme_2023
 """
 

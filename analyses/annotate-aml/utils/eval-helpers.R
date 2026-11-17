@@ -1,6 +1,6 @@
 # Shared code for the held-out evaluation reports:
-#   - 06_evaluate-holdout.Rmd (SingleR, scANVI)
-#   - 07_compare-bonemarrowmap-holdout.Rmd (BoneMarrowMap vs. SingleR and scANVI)
+#   - 05_evaluate-holdout.Rmd (SingleR, scANVI)
+#   - 06_compare-bonemarrowmap-holdout.Rmd (BoneMarrowMap vs. SingleR and scANVI)
 #
 # Source after loading dplyr and ggplot2:
 #   source(fs::path(module_dir, "utils", "eval-helpers.R"))

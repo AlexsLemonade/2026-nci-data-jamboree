@@ -8,8 +8,8 @@ exactly like a new query (e.g., ScPCA):
   - SCANVI.prepare_query_anndata -> SCANVI.load_query_data -> short fine-tune -> predict
 
 Input:
-  - data/AML-scAtlas/AML_scAtlas_le29.h5ad (02_subset-atlas.py)
-  - results/scanvi_ref_no-<study>/scanvi_model/ (04_train-scanvi-ref.py --holdout-study <study>)
+  - data/AML-scAtlas/AML_scAtlas_le29.h5ad (01_subset-atlas.py)
+  - results/scanvi_ref_no-<study>/scanvi_model/ (03_train-scanvi-ref.py --holdout-study <study>)
 Output (results/holdout/):
   - scanvi_predictions_<study>.tsv: cell_id, scanvi_label, scanvi_max_prob
   - scanvi_probabilities_<study>.tsv.gz: per-label probabilities
@@ -17,7 +17,7 @@ Output (results/holdout/):
   - scanvi_query_model_<study>/: the fine-tuned query model
 
 Run from anywhere with:
-  uv run --project analyses/annotate-aml python analyses/annotate-aml/05_predict-holdout-scanvi.py
+  uv run --project analyses/annotate-aml python analyses/annotate-aml/04_predict-holdout-scanvi.py
 """
 
 import argparse
@@ -65,7 +65,7 @@ def main() -> None:
         args.model_dir = module_dir / "results" / f"scanvi_ref_no-{study}" / "scanvi_model"
     if not args.model_dir.exists():
         raise FileNotFoundError(
-            f"{args.model_dir} not found; run 04_train-scanvi-ref.py --holdout-study {study}"
+            f"{args.model_dir} not found; run 03_train-scanvi-ref.py --holdout-study {study}"
         )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     scvi.settings.seed = args.seed

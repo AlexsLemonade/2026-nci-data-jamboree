@@ -15,8 +15,8 @@ params:
 Both references were trained **without** one study (`params$holdout_study`, mumme_2023 by
 default) and then used to label that study's cells:
 
-- **SingleR:** `05_predict-holdout-singler.R`, with the `_no-<study>` trained reference.
-- **scANVI:** `05_predict-holdout-scanvi.py`, scArches query mapping with the true labels hidden.
+- **SingleR:** `04_predict-holdout-singler.R`, with the `_no-<study>` trained reference.
+- **scANVI:** `04_predict-holdout-scanvi.py`, scArches query mapping with the true labels hidden.
 
 This notebook compares those predictions with the atlas labels. It only reads results, so it
 re-knits quickly; produce them with `run-holdout-eval.sh`.
@@ -54,7 +54,7 @@ stopifnot(
   fs::file_exists(scanvi_file)
 )
 
-# Plot style, metric and plotting functions shared with 07_compare-bonemarrowmap-holdout.Rmd
+# Plot style, metric and plotting functions shared with 06_compare-bonemarrowmap-holdout.Rmd
 source(fs::path(module_dir, "utils", "eval-helpers.R"))
 ```
 

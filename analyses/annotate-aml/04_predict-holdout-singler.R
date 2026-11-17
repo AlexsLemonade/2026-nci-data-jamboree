@@ -4,14 +4,14 @@
 # See .workspace/annotate-aml/evaluation.md (design step 1).
 #
 # Input:
-#   - data/AML-scAtlas/AML_scAtlas_le29.h5ad (02_subset-atlas.py)
-#   - results/AML_scAtlas_le29_singler_trained_ref_no-<study>.rds (03_build-singler-ref.Rmd
+#   - data/AML-scAtlas/AML_scAtlas_le29.h5ad (01_subset-atlas.py)
+#   - results/AML_scAtlas_le29_singler_trained_ref_no-<study>.rds (02_build-singler-ref.Rmd
 #     rendered with holdout_study = <study>)
 # Output:
 #   - results/holdout/singler_predictions_<study>.tsv
 #
 # Usage (run from analyses/annotate-aml so renv is activated):
-#   Rscript 05_predict-holdout-singler.R [holdout_study] [n_workers]
+#   Rscript 04_predict-holdout-singler.R [holdout_study] [n_workers]
 # Defaults: holdout_study = mumme_2023, n_workers = 4
 
 suppressPackageStartupMessages({
@@ -37,7 +37,7 @@ output_file <- fs::path(output_dir, paste0("singler_predictions_", holdout_study
 
 stopifnot(
   "Atlas subset not found" = fs::file_exists(atlas_file),
-  "Held-out trained reference not found; render 03_build-singler-ref.Rmd with holdout_study" =
+  "Held-out trained reference not found; render 02_build-singler-ref.Rmd with holdout_study" =
     fs::file_exists(trained_ref_file)
 )
 
