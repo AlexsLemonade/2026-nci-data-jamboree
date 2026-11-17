@@ -1,0 +1,744 @@
+---
+title: "BoneMarrowMap on held-out cells, compared with SingleR and scANVI"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: "JN Taroni"
+date: 2026
+params:
+  holdout_study: "mumme_2023"
+---
+
+## Introduction
+
+This notebook compares three annotations of the held-out study's cells (`params$holdout_study`,
+mumme_2023 by default) with each other and with the atlas labels:
+
+- **SingleR** and **scANVI**: references trained on the AML scAtlas without this study
+  (`04_predict-holdout-singler.R`, `04_predict-holdout-scanvi.py`; evaluated in
+  `05_evaluate-holdout.Rmd`).
+- **BoneMarrowMap**: Symphony mapping onto a reference built only from healthy bone marrow,
+  then kNN cell type and pseudotime prediction (`04_predict-holdout-bonemarrowmap.R`).
+
+The question is whether BoneMarrowMap is a useful third opinion for ScPCA SCPCP000007, especially
+for HSPC/blast states. See `.workspace/annotate-aml/bonemarrowmap.md` for the plan and decisions.
+
+Things to keep in mind while reading:
+
+- **BoneMarrowMap has its own labels** (55 fine, 24 broad), and they don't match the atlas's.
+  There's no crosswalk, so this notebook has no BoneMarrowMap accuracy. It compares labelings
+  directly: cross-tabs, and agreement measures that don't need shared labels.
+- **The reference is normal-only.** Blasts get mapped onto normal states, so a `-like`/`LSC`
+  cell landing on "HSC" or "GMP" isn't necessarily an error.
+- **Mapping QC is relative to the query.** A cell fails if its mapping error is more than
+  2.5 MADs above the median of *this study's* cells. So about the same fraction fails in any
+  query. The failure rate isn't an absolute measure of mapping quality, and in AML the median
+  itself rises with off-reference blasts.
+- **Every comparison uses the same cells for all three methods**, once for all cells and once
+  for cells that pass BoneMarrowMap's QC. Dropping QC failures for BoneMarrowMap alone would
+  favor it.
+- **Gene coverage.** Only 2,133 of BoneMarrowMap's 2,386 mapping genes (89.4%) are in the atlas.
+  About 40–60 are renamed genes, mostly histones. The rest aren't in the atlas at all,
+  including HLA class I/II, `B2M`, `PTPRC`, `MALAT1`, `ELANE`, `PRTN3`, `AZU1`, `MS4A3`,
+  `LILRA4` and `IRF7`. Missing genes are set to the reference mean, so they carry no signal.
+  SingleR and scANVI never had these genes either. On SCPCP000007, BoneMarrowMap will have
+  them, so this study probably makes BoneMarrowMap look worse than it will on ScPCA.
+- mumme_2023 has the atlas's only 5′ data, and every result is split by assay. Each sample is
+  one donor on one assay.
+- "Truth" is the atlas annotation, which is itself a prediction from the atlas authors.
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+
+holdout_study <- params$holdout_study
+
+root_dir <- rprojroot::find_root(rprojroot::has_dir(".git"))
+module_dir <- fs::path(root_dir, "analyses", "annotate-aml")
+atlas_file <- fs::path(root_dir, "data", "AML-scAtlas", "AML_scAtlas_le29.h5ad")
+holdout_dir <- fs::path(module_dir, "results", "holdout")
+singler_file <- fs::path(holdout_dir, paste0("singler_predictions_", holdout_study, ".tsv"))
+scanvi_file <- fs::path(holdout_dir, paste0("scanvi_predictions_", holdout_study, ".tsv"))
+bmm_file <- fs::path(holdout_dir, paste0("bonemarrowmap_predictions_", holdout_study, ".tsv"))
+
+stopifnot(
+  fs::file_exists(atlas_file),
+  fs::file_exists(singler_file),
+  fs::file_exists(scanvi_file),
+  fs::file_exists(bmm_file)
+)
+
+# Plot style, metric and plotting functions shared with 05_evaluate-holdout.Rmd
+source(fs::path(module_dir, "utils", "eval-helpers.R"))
+
+# BoneMarrowMap's mapping-QC threshold, in MADs above the query median (package default)
+mad_threshold <- 2.5
+```
+
+Plot styling: color identifies the **method** (categorical slots 1–3 of the reference palette),
+and assays are separate panels. Heatmaps use a single blue ramp.
+
+```{r plot-style}
+method_colors <- method_colors_all[c("SingleR", "scANVI", "BoneMarrowMap")]
+theme_set(eval_theme())
+scale_color_method <- scale_color_manual(values = method_colors, name = "Method")
+```
+
+## Load truth and predictions
+
+True labels, assay and donor for the held-out cells, from the atlas subset (metadata only).
+
+```{r truth}
+adata <- anndataR::read_h5ad(atlas_file, as = "HDF5AnnData")
+obs <- adata$obs
+obs$cell_id <- adata$obs_names
+rm(adata)
+
+# label_fine -> label_broad map; each fine class belongs to exactly one broad class
+label_map <- obs |>
+  distinct(label_fine = as.character(label_fine), label_broad = as.character(label_broad))
+stopifnot(!anyDuplicated(label_map$label_fine))
+
+truth <- obs |>
+  filter(Study == holdout_study) |>
+  transmute(
+    cell_id,
+    donor_id = as.character(donor_id),
+    assay = as.character(assay),
+    true_fine = as.character(label_fine),
+    true_broad = as.character(label_broad)
+  )
+
+nrow(truth)
+```
+
+One row per cell, with all three methods' labels and confidence measures. SingleR labels are
+**unpruned**, as in 05. BoneMarrowMap labels are kept for every cell, including QC failures
+(`bmm_pass` marks the cells that pass).
+
+```{r predictions}
+singler <- data.table::fread(singler_file, data.table = FALSE)
+scanvi <- data.table::fread(scanvi_file, data.table = FALSE)
+bmm <- data.table::fread(bmm_file, data.table = FALSE)
+
+stopifnot(
+  setequal(singler$cell_id, truth$cell_id),
+  setequal(scanvi$cell_id, truth$cell_id),
+  setequal(bmm$cell_id, truth$cell_id)
+)
+
+is_malignant_like <- function(label) grepl("-like$", label) | label == "HSPC:LSC"
+
+cells <- truth |>
+  inner_join(
+    singler |> transmute(cell_id, singler_fine = singler_label, singler_delta_next),
+    by = "cell_id"
+  ) |>
+  inner_join(
+    scanvi |> transmute(cell_id, scanvi_fine = scanvi_label, scanvi_max_prob),
+    by = "cell_id"
+  ) |>
+  inner_join(
+    bmm |> transmute(
+      cell_id, bmm_assay = assay, bmm_label, bmm_label_broad, bmm_label_prob,
+      bmm_pseudotime, bmm_mapping_error, bmm_mapping_qc
+    ),
+    by = "cell_id"
+  ) |>
+  left_join(
+    label_map |> rename(singler_fine = label_fine, singler_broad = label_broad),
+    by = "singler_fine"
+  ) |>
+  left_join(
+    label_map |> rename(scanvi_fine = label_fine, scanvi_broad = label_broad),
+    by = "scanvi_fine"
+  ) |>
+  mutate(
+    bmm_pass = bmm_mapping_qc == "Pass",
+    true_mal = is_malignant_like(true_fine)
+  )
+
+stopifnot(
+  nrow(cells) == nrow(truth),
+  identical(cells$assay, cells$bmm_assay),
+  !anyNA(cells$singler_broad),
+  !anyNA(cells$scanvi_broad),
+  !anyNA(cells$bmm_label),
+  !anyNA(cells$bmm_mapping_error)
+)
+
+count(cells, assay)
+```
+
+### Pseudotime outside the hierarchy
+
+BoneMarrowMap's pseudotime covers the lineages that come from HSCs in its reference (myeloid,
+erythroid, B and DC). T, NK, plasma and stromal cells sit outside it and get a placeholder 0.
+That's the same value as the most primitive stem cells, but it means "undefined", not "early".
+So for cells with those labels, this notebook sets pseudotime to `NA`. Otherwise a blast that
+lands among T cells would look maximally primitive. The labels themselves are kept.
+
+The check below shows the distinction: cells with off-hierarchy labels are almost all exactly 0,
+while cells with hierarchy labels, even HSCs, rarely are.
+
+```{r pseudotime-off-hierarchy}
+off_hierarchy_broad <- c("Naive T", "CD4 Memory T", "CD8 Memory T", "NK", "Plasma Cell", "Stromal")
+stopifnot(all(off_hierarchy_broad %in% cells$bmm_label_broad))
+
+cells <- cells |>
+  mutate(
+    bmm_off_hierarchy = bmm_label_broad %in% off_hierarchy_broad,
+    bmm_pseudotime_raw = bmm_pseudotime,
+    bmm_pseudotime = if_else(bmm_off_hierarchy, NA_real_, bmm_pseudotime)
+  )
+
+cells |>
+  group_by(bmm_off_hierarchy) |>
+  summarize(
+    n_cells = n(),
+    frac_exactly_0 = mean(bmm_pseudotime_raw == 0),
+    median_raw = median(bmm_pseudotime_raw)
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+BoneMarrowMap's labels, in an order used throughout. Labels in the hierarchy come first, by the
+median pseudotime of the query cells given that label, so they run roughly from stem cells to
+mature cells. The off-hierarchy labels follow in a fixed order (T, NK, plasma, stromal).
+
+```{r bmm-label-order}
+order_bmm_labels <- function(cells, label_col) {
+  medians <- cells |>
+    filter(!bmm_off_hierarchy) |>
+    group_by(label = .data[[label_col]]) |>
+    summarize(median_pt = median(bmm_pseudotime)) |>
+    arrange(median_pt, label) |>
+    pull(label)
+  off <- cells |>
+    filter(bmm_off_hierarchy) |>
+    mutate(group = match(bmm_label_broad, off_hierarchy_broad)) |>
+    distinct(label = .data[[label_col]], group) |>
+    arrange(group, label) |>
+    pull(label)
+  c(medians, off)
+}
+
+bmm_fine_levels <- order_bmm_labels(cells, "bmm_label")
+bmm_broad_levels <- order_bmm_labels(cells, "bmm_label_broad")
+stopifnot(
+  setequal(bmm_fine_levels, unique(cells$bmm_label)),
+  setequal(bmm_broad_levels, unique(cells$bmm_label_broad))
+)
+
+# Order the rows of a cross-tab so the heatmap is as close to diagonal as possible: by the
+# share-weighted mean position of each row label's cells along the columns
+diagonal_row_order <- function(df, col_levels) {
+  df |>
+    count(row, col) |>
+    group_by(row) |>
+    summarize(position = sum(n * match(col, col_levels)) / sum(n)) |>
+    arrange(position) |>
+    pull(row)
+}
+```
+
+## Mapping QC
+
+How many cells fail BoneMarrowMap's mapping QC? First, a check that the TSV's QC flag matches
+the threshold recomputed from the mapping-error scores. The rest of the notebook relies on this
+to try other thresholds.
+
+```{r qc-recompute}
+qc_threshold <- function(error, n_mads) median(error) + n_mads * mad(error)
+
+recomputed_threshold <- qc_threshold(cells$bmm_mapping_error, mad_threshold)
+recomputed_pass <- cells$bmm_mapping_error < recomputed_threshold
+# The TSV stores scores as text, so allow mismatches only for cells right at the threshold
+mismatch <- recomputed_pass != cells$bmm_pass
+stopifnot(
+  "Recomputed QC flags don't match the TSV" =
+    all(abs(cells$bmm_mapping_error[mismatch] - recomputed_threshold) < 1e-6)
+)
+sum(mismatch)
+
+cells |>
+  group_by(assay) |>
+  summarize(n_cells = n(), n_fail = sum(!bmm_pass), frac_fail = mean(!bmm_pass)) |>
+  knitr::kable(digits = 3)
+```
+
+Mapping-error distributions by donor. The dashed line is the 2.5-MAD threshold computed over all
+cells. Donor and assay are confounded (each donor is on one assay), so a per-donor threshold
+would also hide any difference between assays.
+
+```{r qc-error-by-donor, fig.width = 9, fig.height = 7}
+global_threshold <- recomputed_threshold
+
+donor_order <- cells |>
+  group_by(donor_id) |>
+  summarize(median_error = median(bmm_mapping_error)) |>
+  arrange(median_error) |>
+  pull(donor_id)
+
+cells |>
+  mutate(donor_id = factor(donor_id, levels = donor_order)) |>
+  ggplot(aes(x = bmm_mapping_error, y = donor_id)) +
+  geom_boxplot(
+    color = method_colors[["BoneMarrowMap"]], fill = NA, outlier.size = 0.3,
+    outlier.alpha = 0.3
+  ) +
+  geom_vline(xintercept = global_threshold, linetype = "dashed", color = ink_secondary) +
+  facet_grid(assay ~ ., scales = "free_y", space = "free_y") +
+  labs(
+    x = "Mapping error score", y = NULL,
+    title = "BoneMarrowMap mapping error by donor",
+    subtitle = paste0("Dashed line: ", mad_threshold, "-MAD threshold over all cells")
+  )
+```
+
+Which true labels fail most often? Labels with fewer than 50 cells in an assay are left out.
+
+```{r qc-by-truth, fig.width = 9, fig.height = 7}
+qc_by_truth <- cells |>
+  group_by(assay, true_fine) |>
+  summarize(n_cells = n(), frac_fail = mean(!bmm_pass), .groups = "drop") |>
+  filter(n_cells >= 50)
+
+qc_truth_order <- qc_by_truth |>
+  group_by(true_fine) |>
+  summarize(mean_fail = mean(frac_fail)) |>
+  arrange(mean_fail) |>
+  pull(true_fine)
+
+qc_by_truth |>
+  mutate(true_fine = factor(true_fine, levels = qc_truth_order)) |>
+  ggplot(aes(x = frac_fail, y = true_fine, size = n_cells)) +
+  geom_point(color = method_colors[["BoneMarrowMap"]], alpha = 0.85) +
+  facet_wrap(~assay) +
+  scale_size_area(max_size = 4, name = "Cells") +
+  labs(x = "Fraction failing mapping QC", y = "True label (label_fine)",
+       title = "BoneMarrowMap mapping-QC failures by true label")
+```
+
+Malignant-proxy (`-like`/`LSC`) cells compared with other cells, and with other HSPCs only (true
+`label_broad` = `hematopoietic stem cell`), since HSPCs may map differently anyway.
+
+```{r qc-malignancy}
+cells |>
+  mutate(
+    group = case_when(
+      true_mal ~ "-like/LSC",
+      true_broad == "hematopoietic stem cell" ~ "other HSPC",
+      TRUE ~ "non-HSPC"
+    )
+  ) |>
+  group_by(assay, group) |>
+  summarize(
+    n_cells = n(),
+    frac_fail = mean(!bmm_pass),
+    median_error = median(bmm_mapping_error),
+    .groups = "drop"
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+## Native-label cross-tabs
+
+The main view of how the label sets relate. Rows are normalized to sum to 1 within each assay, so
+a row shows where that label's cells went in BoneMarrowMap. Columns are BoneMarrowMap labels in
+pseudotime order. All cells, including QC failures.
+
+### Truth vs. BoneMarrowMap
+
+```{r crosstab-truth-broad, fig.width = 11, fig.height = 14}
+truth_vs_bmm_broad <- cells |> transmute(assay, row = true_fine, col = bmm_label_broad)
+
+plot_crosstab(
+  truth_vs_bmm_broad,
+  title = "Atlas label_fine vs. BoneMarrowMap broad label",
+  row_title = "True label (label_fine)",
+  col_title = "BoneMarrowMap broad label",
+  row_levels = diagonal_row_order(truth_vs_bmm_broad, bmm_broad_levels),
+  col_levels = bmm_broad_levels
+)
+```
+
+```{r crosstab-truth-fine, fig.width = 16, fig.height = 14}
+truth_vs_bmm_fine <- cells |> transmute(assay, row = true_fine, col = bmm_label)
+
+plot_crosstab(
+  truth_vs_bmm_fine,
+  title = "Atlas label_fine vs. BoneMarrowMap fine label",
+  row_title = "True label (label_fine)",
+  col_title = "BoneMarrowMap label",
+  row_levels = diagonal_row_order(truth_vs_bmm_fine, bmm_fine_levels),
+  col_levels = bmm_fine_levels
+)
+```
+
+The same in the other direction: what each BoneMarrowMap broad label is made of in the atlas
+labels. Rows are BoneMarrowMap labels.
+
+```{r crosstab-bmm-truth, fig.width = 13, fig.height = 13}
+bmm_vs_truth <- cells |> transmute(assay, row = bmm_label_broad, col = true_fine)
+truth_levels <- diagonal_row_order(truth_vs_bmm_broad, bmm_broad_levels)
+
+plot_crosstab(
+  bmm_vs_truth,
+  title = "BoneMarrowMap broad label vs. atlas label_fine",
+  row_title = "BoneMarrowMap broad label",
+  col_title = "True label (label_fine)",
+  row_levels = bmm_broad_levels,
+  col_levels = truth_levels
+)
+```
+
+The atlas-label × BoneMarrowMap cross-tab again, for cells passing QC only, to see whether the
+failures change the picture.
+
+```{r crosstab-truth-broad-pass, fig.width = 11, fig.height = 14}
+truth_vs_bmm_broad_pass <- cells |>
+  filter(bmm_pass) |>
+  transmute(assay, row = true_fine, col = bmm_label_broad)
+
+plot_crosstab(
+  truth_vs_bmm_broad_pass,
+  title = "Atlas label_fine vs. BoneMarrowMap broad label (cells passing QC)",
+  row_title = "True label (label_fine)",
+  col_title = "BoneMarrowMap broad label",
+  row_levels = truth_levels,
+  col_levels = bmm_broad_levels
+)
+```
+
+### SingleR and scANVI vs. BoneMarrowMap
+
+```{r crosstab-singler, fig.width = 11, fig.height = 14}
+singler_vs_bmm <- cells |> transmute(assay, row = singler_fine, col = bmm_label_broad)
+
+plot_crosstab(
+  singler_vs_bmm,
+  title = "SingleR label vs. BoneMarrowMap broad label",
+  row_title = "SingleR label (label_fine)",
+  col_title = "BoneMarrowMap broad label",
+  row_levels = diagonal_row_order(singler_vs_bmm, bmm_broad_levels),
+  col_levels = bmm_broad_levels
+)
+```
+
+```{r crosstab-scanvi, fig.width = 11, fig.height = 14}
+scanvi_vs_bmm <- cells |> transmute(assay, row = scanvi_fine, col = bmm_label_broad)
+
+plot_crosstab(
+  scanvi_vs_bmm,
+  title = "scANVI label vs. BoneMarrowMap broad label",
+  row_title = "scANVI label (label_fine)",
+  col_title = "BoneMarrowMap broad label",
+  row_levels = diagonal_row_order(scanvi_vs_bmm, bmm_broad_levels),
+  col_levels = bmm_broad_levels
+)
+```
+
+## Agreement without shared labels
+
+Two measures of how similarly two labelings group the same cells, whatever the labels are called:
+
+- **Adjusted Rand index (ARI):** 1 = the same grouping, about 0 = no better than chance.
+- **Normalized mutual information (NMI):** 1 = the same grouping, 0 = independent.
+
+Both are lowered by differences in granularity alone. BoneMarrowMap has 10 T cell labels and the
+atlas has one, so a perfectly consistent method still scores below 1. Read them as comparisons
+between methods, not as absolute measures. SingleR and scANVI are at `label_fine`, the level
+they were trained on.
+
+```{r agreement}
+labelings <- c(
+  "Truth (fine)" = "true_fine",
+  "Truth (broad)" = "true_broad",
+  "SingleR" = "singler_fine",
+  "scANVI" = "scanvi_fine",
+  "BoneMarrowMap (fine)" = "bmm_label",
+  "BoneMarrowMap (broad)" = "bmm_label_broad"
+)
+labeling_pairs <- combn(names(labelings), 2, simplify = FALSE)
+
+agreement_scores <- function(df) {
+  purrr::map(labeling_pairs, \(pair) {
+    x <- df[[labelings[[pair[1]]]]]
+    y <- df[[labelings[[pair[2]]]]]
+    tibble::tibble(
+      labeling_1 = pair[1],
+      labeling_2 = pair[2],
+      ari = adjusted_rand_index(x, y),
+      nmi = normalized_mutual_info(x, y)
+    )
+  }) |>
+    purrr::list_rbind()
+}
+
+agreement <- bind_rows(
+  cells |> mutate(cell_subset = "All cells"),
+  cells |> filter(bmm_pass) |> mutate(cell_subset = "Passing BoneMarrowMap QC")
+) |>
+  group_by(cell_subset, assay) |>
+  group_modify(\(df, key) agreement_scores(df)) |>
+  ungroup()
+```
+
+```{r agreement-plot, fig.width = 12, fig.height = 10}
+plot_agreement <- function(agreement, measure, title) {
+  # both triangles, so each labeling's row reads across
+  both <- bind_rows(
+    agreement |> transmute(cell_subset, assay, x = labeling_1, y = labeling_2, value = .data[[measure]]),
+    agreement |> transmute(cell_subset, assay, x = labeling_2, y = labeling_1, value = .data[[measure]])
+  ) |>
+    mutate(
+      x = factor(x, levels = names(labelings)),
+      y = factor(y, levels = rev(names(labelings)))
+    )
+  ggplot(both, aes(x = x, y = y, fill = value)) +
+    geom_tile(color = "#fcfcfb", linewidth = 0.5) +
+    geom_text(aes(label = sprintf("%.2f", value), color = value > 0.55), size = 2.8,
+              show.legend = FALSE) +
+    scale_fill_gradientn(colors = seq_blue, limits = c(0, 1), name = toupper(measure)) +
+    scale_color_manual(values = c(`FALSE` = ink_primary, `TRUE` = "#ffffff")) +
+    facet_grid(assay ~ cell_subset) +
+    labs(x = NULL, y = NULL, title = title) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank())
+}
+
+plot_agreement(agreement, "ari", "Adjusted Rand index between labelings")
+```
+
+```{r agreement-nmi-plot, fig.width = 12, fig.height = 10}
+plot_agreement(agreement, "nmi", "Normalized mutual information between labelings")
+```
+
+```{r agreement-table}
+agreement |>
+  arrange(cell_subset, assay, labeling_1, labeling_2) |>
+  knitr::kable(digits = 3)
+```
+
+### Sensitivity to the QC threshold
+
+At thresholds of 2, 2.5 (the default), 3 and 4 MADs, plus no QC filtering, which fraction of
+cells is kept, and how well does each method agree with the atlas `label_fine` on those cells?
+All three methods are scored on the same kept cells.
+
+```{r qc-sensitivity, fig.width = 9, fig.height = 4}
+qc_settings <- c("2", "2.5", "3", "4", "none")
+
+sensitivity <- purrr::map(qc_settings, \(setting) {
+  kept <- if (setting == "none") {
+    rep(TRUE, nrow(cells))
+  } else {
+    cells$bmm_mapping_error < qc_threshold(cells$bmm_mapping_error, as.numeric(setting))
+  }
+  cells[kept, ] |>
+    group_by(assay) |>
+    summarize(
+      qc_mads = setting,
+      n_kept = n(),
+      ari_SingleR = adjusted_rand_index(true_fine, singler_fine),
+      ari_scANVI = adjusted_rand_index(true_fine, scanvi_fine),
+      ari_BoneMarrowMap = adjusted_rand_index(true_fine, bmm_label),
+      .groups = "drop"
+    )
+}) |>
+  purrr::list_rbind() |>
+  left_join(count(cells, assay, name = "n_total"), by = "assay") |>
+  mutate(frac_kept = n_kept / n_total, qc_mads = factor(qc_mads, levels = qc_settings))
+
+sensitivity_long <- sensitivity |>
+  tidyr::pivot_longer(starts_with("ari_"), names_to = "method", names_prefix = "ari_",
+                      values_to = "ari") |>
+  mutate(method = factor(method, levels = names(method_colors)))
+
+ggplot(sensitivity_long, aes(x = qc_mads, y = ari, color = method, group = method)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2) +
+  facet_wrap(~assay) +
+  scale_color_method +
+  labs(x = "QC threshold (MADs above median)", y = "ARI with atlas label_fine",
+       title = "Agreement with atlas labels on cells kept by BoneMarrowMap QC")
+```
+
+```{r qc-sensitivity-kept, fig.width = 9, fig.height = 3.5}
+ggplot(sensitivity, aes(x = qc_mads, y = frac_kept, group = 1)) +
+  geom_line(color = method_colors[["BoneMarrowMap"]], linewidth = 0.7) +
+  geom_point(color = method_colors[["BoneMarrowMap"]], size = 2) +
+  facet_wrap(~assay) +
+  scale_y_continuous(limits = c(NA, 1)) +
+  labs(x = "QC threshold (MADs above median)", y = "Fraction of cells kept",
+       title = "Cells kept by BoneMarrowMap QC")
+```
+
+```{r qc-sensitivity-table}
+sensitivity |>
+  select(assay, qc_mads, n_kept, frac_kept, starts_with("ari_")) |>
+  arrange(assay, qc_mads) |>
+  knitr::kable(digits = 3)
+```
+
+## Where the methods disagree
+
+When SingleR and scANVI give the same `label_fine`, what does BoneMarrowMap call those cells?
+That shows where BoneMarrowMap disagrees with both atlas-trained methods at once.
+
+```{r consensus}
+cells <- cells |> mutate(atlas_consensus = singler_fine == scanvi_fine)
+
+cells |>
+  group_by(assay) |>
+  summarize(
+    n_cells = n(),
+    frac_consensus = mean(atlas_consensus),
+    frac_consensus_correct = mean(atlas_consensus & singler_fine == true_fine)
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+```{r consensus-crosstab, fig.width = 11, fig.height = 14}
+consensus_vs_bmm <- cells |>
+  filter(atlas_consensus) |>
+  transmute(assay, row = singler_fine, col = bmm_label_broad)
+
+plot_crosstab(
+  consensus_vs_bmm,
+  title = "Cells where SingleR and scANVI agree: their label vs. BoneMarrowMap broad label",
+  row_title = "SingleR = scANVI label",
+  col_title = "BoneMarrowMap broad label",
+  row_levels = diagonal_row_order(consensus_vs_bmm, bmm_broad_levels),
+  col_levels = bmm_broad_levels
+)
+```
+
+Is BoneMarrowMap's confidence related to whether the atlas-trained methods agree, and to their
+own confidence? Spearman correlations within each assay, over all cells.
+
+```{r confidence-relations}
+cells |>
+  group_by(assay) |>
+  summarize(
+    error_vs_singler_delta = cor(bmm_mapping_error, singler_delta_next, method = "spearman"),
+    error_vs_scanvi_prob = cor(bmm_mapping_error, scanvi_max_prob, method = "spearman"),
+    knn_prob_vs_singler_delta = cor(bmm_label_prob, singler_delta_next, method = "spearman"),
+    knn_prob_vs_scanvi_prob = cor(bmm_label_prob, scanvi_max_prob, method = "spearman")
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+```{r confidence-by-consensus, fig.width = 9, fig.height = 5}
+cells |>
+  mutate(atlas_consensus = if_else(atlas_consensus, "SingleR = scANVI", "SingleR ≠ scANVI")) |>
+  tidyr::pivot_longer(c(bmm_mapping_error, bmm_label_prob), names_to = "measure") |>
+  mutate(measure = recode(
+    measure,
+    bmm_mapping_error = "Mapping error score",
+    bmm_label_prob = "kNN label probability"
+  )) |>
+  ggplot(aes(x = value, y = atlas_consensus)) +
+  geom_boxplot(color = method_colors[["BoneMarrowMap"]], fill = NA, outlier.size = 0.3,
+               outlier.alpha = 0.3) +
+  facet_grid(assay ~ measure, scales = "free_x") +
+  labs(x = NULL, y = NULL,
+       title = "BoneMarrowMap confidence by whether SingleR and scANVI agree")
+```
+
+## Malignancy proxy
+
+The atlas's only per-cell malignancy signal is the `-like`/`LSC` HSPC sub-labels (see
+`reference.md`). Where do those cells land in BoneMarrowMap, compared with the other HSPC
+sub-labels? Rows are true HSPC sub-labels (true `label_broad` = `hematopoietic stem cell`).
+
+```{r malignancy-crosstab, fig.width = 16, fig.height = 9}
+hspc_vs_bmm <- cells |>
+  filter(true_broad == "hematopoietic stem cell") |>
+  transmute(assay, row = true_fine, col = bmm_label)
+
+plot_crosstab(
+  hspc_vs_bmm,
+  title = "True HSPC sub-labels vs. BoneMarrowMap fine label",
+  row_title = "True HSPC sub-label",
+  col_title = "BoneMarrowMap label",
+  row_levels = diagonal_row_order(hspc_vs_bmm, bmm_fine_levels),
+  col_levels = bmm_fine_levels
+)
+```
+
+Pseudotime of `-like`/`LSC` cells compared with the other HSPCs. HSPCs that BoneMarrowMap places
+outside the hierarchy (T, NK, plasma, stromal labels) have no pseudotime and are left out; the
+table shows how many.
+
+```{r malignancy-pseudotime-missing}
+cells |>
+  filter(true_broad == "hematopoietic stem cell") |>
+  group_by(assay, group = if_else(true_mal, "-like/LSC", "other HSPC")) |>
+  summarize(n_cells = n(), n_off_hierarchy = sum(bmm_off_hierarchy), .groups = "drop") |>
+  knitr::kable()
+```
+
+```{r malignancy-pseudotime, fig.width = 9, fig.height = 6}
+cells |>
+  filter(true_broad == "hematopoietic stem cell", !bmm_off_hierarchy) |>
+  mutate(group = if_else(true_mal, "-like/LSC", "other HSPC")) |>
+  ggplot(aes(x = bmm_pseudotime, y = reorder(true_fine, bmm_pseudotime, FUN = median),
+             linetype = group)) +
+  geom_boxplot(color = method_colors[["BoneMarrowMap"]], fill = NA, outlier.size = 0.3,
+               outlier.alpha = 0.3) +
+  facet_wrap(~assay) +
+  scale_linetype_manual(values = c(`-like/LSC` = "solid", `other HSPC` = "dashed"), name = NULL) +
+  labs(x = "BoneMarrowMap pseudotime", y = "True HSPC sub-label",
+       title = "BoneMarrowMap pseudotime of HSPC sub-labels")
+```
+
+## Pseudotime by true label
+
+A sanity check: does BoneMarrowMap's pseudotime order the atlas labels sensibly (stem cells
+early, mature cells late)? Only cells with a defined pseudotime (hierarchy labels). True T, NK
+and plasma cells mostly drop out, which is expected, and labels with fewer than 20 such cells
+in an assay are left out.
+
+```{r pseudotime-by-truth, fig.width = 9, fig.height = 8}
+cells |>
+  filter(!bmm_off_hierarchy) |>
+  add_count(assay, true_fine, name = "n_label") |>
+  filter(n_label >= 20) |>
+  ggplot(aes(x = bmm_pseudotime, y = reorder(true_fine, bmm_pseudotime, FUN = median))) +
+  geom_boxplot(color = method_colors[["BoneMarrowMap"]], fill = NA, outlier.size = 0.3,
+               outlier.alpha = 0.3) +
+  facet_wrap(~assay) +
+  labs(x = "BoneMarrowMap pseudotime", y = "True label (label_fine)",
+       title = "BoneMarrowMap pseudotime by atlas label")
+```
+
+## BoneMarrowMap `Stromal` cells
+
+AML marrow aspirates shouldn't contain many stromal cells, so what are the cells BoneMarrowMap
+calls `Stromal`?
+
+```{r stromal}
+stromal <- cells |> filter(bmm_label == "Stromal")
+
+stromal |>
+  group_by(assay) |>
+  summarize(n_cells = n(), frac_pass_qc = mean(bmm_pass)) |>
+  knitr::kable(digits = 3)
+
+stromal |>
+  count(assay, true_fine, singler_fine, scanvi_fine, sort = TRUE) |>
+  head(20) |>
+  knitr::kable()
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```

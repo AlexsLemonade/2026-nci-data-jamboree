@@ -1,0 +1,275 @@
+---
+title: "Atlas MEP cells that BoneMarrowMap calls EoBasoMast precursors: a marker check"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: "JN Taroni"
+date: 2026
+params:
+  holdout_study: "mumme_2023"
+---
+
+## Introduction
+
+In `06_compare-bonemarrowmap-holdout.Rmd`, most of the held-out study's atlas
+`megakaryocyte-erythroid progenitor cell` (MEP) cells land on BoneMarrowMap's
+`EoBasoMast Precursor`: 0.85 on 10x 5′, and on 3′ 0.44 EoBasoMast plus 0.41 Megakaryocyte
+Precursor. Is this a naming difference or a mismatch?
+
+- The atlas has no eosinophil/basophil/mast class, so its authors may have put those progenitors
+  in "MEP".
+- Basophil/mast progenitors are known to branch off near the erythroid/megakaryocyte side of the
+  hierarchy, so GATA1+ GATA2+ progenitors could reasonably get either name.
+
+This notebook compares marker genes across groups of cells:
+
+- **Held-out study**, by assay: truth MEP split by BoneMarrowMap broad label; other cells
+  BoneMarrowMap calls EoBasoMast; and comparators (erythroid, HSC, GMP, and monocytes as a
+  negative control).
+- **The rest of the atlas:** MEP cells from the other studies, healthy vs AML donors, to see whether
+  the atlas's MEP label includes basophil/mast progenitors by convention.
+
+How to read it:
+
+- Basophil/mast genes high and erythroid/megakaryocyte genes low in "MEP → EoBasoMast": the atlas's
+  "MEP" cells here are largely basophil/mast-committed, and BoneMarrowMap's name is more specific.
+- Erythroid/megakaryocyte genes high and basophil/mast genes low: BoneMarrowMap is mislabeling them.
+- Both: a shared progenitor; both names are defensible.
+
+See `.workspace/annotate-aml/bonemarrowmap.md` (step 5).
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+
+holdout_study <- params$holdout_study
+
+root_dir <- rprojroot::find_root(rprojroot::has_dir(".git"))
+module_dir <- fs::path(root_dir, "analyses", "annotate-aml")
+atlas_file <- fs::path(root_dir, "data", "AML-scAtlas", "AML_scAtlas_le29.h5ad")
+bmm_file <- fs::path(
+  module_dir, "results", "holdout",
+  paste0("bonemarrowmap_predictions_", holdout_study, ".tsv")
+)
+
+stopifnot(fs::file_exists(atlas_file), fs::file_exists(bmm_file))
+
+# Plot style shared with the evaluation reports
+source(fs::path(module_dir, "utils", "eval-helpers.R"))
+theme_set(eval_theme())
+
+# Comparator groups are downsampled to at most this many cells per group and assay
+max_cells_per_group <- 500
+set.seed(2026)
+```
+
+Marker genes, by cell type. All are in the atlas; `FCER1A` (basophil/mast) would belong here but
+isn't in the atlas's gene list.
+
+```{r markers}
+markers <- list(
+  "Eo/Baso/Mast" = c("HDC", "CPA3", "MS4A2", "TPSAB1", "TPSB2", "KIT", "GATA2", "LMO4", "CLC",
+                     "PRG2", "EPX", "ENPP3", "HPGDS", "IL5RA", "CEBPE"),
+  "Erythroid" = c("GATA1", "KLF1", "TFRC", "CA1", "HBD", "HBB", "CD36", "MYB", "APOC1"),
+  "Megakaryocyte" = c("ITGA2B", "PF4", "PPBP", "GP9", "VWF", "GP1BA"),
+  "HSPC/GMP" = c("CD34", "CRHBP", "AVP", "MPO", "CTSG")
+)
+marker_sets <- tibble::tibble(
+  gene = unlist(markers, use.names = FALSE),
+  marker_set = factor(rep(names(markers), lengths(markers)), levels = names(markers))
+)
+stopifnot(!anyDuplicated(marker_sets$gene))
+```
+
+## Select cells
+
+```{r obs}
+adata <- anndataR::read_h5ad(atlas_file, as = "HDF5AnnData")
+obs <- adata$obs |>
+  transmute(
+    cell_id = adata$obs_names,
+    study = as.character(Study),
+    assay = as.character(assay),
+    disease = as.character(disease),
+    true_fine = as.character(label_fine),
+    true_broad = as.character(label_broad)
+  )
+gene_symbols <- setNames(as.character(adata$var$gene_symbol), adata$var_names)
+stopifnot(all(marker_sets$gene %in% gene_symbols))
+
+bmm <- data.table::fread(bmm_file, data.table = FALSE) |>
+  select(cell_id, bmm_label, bmm_label_broad)
+```
+
+Groups in the held-out study are exclusive, assigned in this order: truth MEP (by BoneMarrowMap
+broad label), then other cells BoneMarrowMap calls EoBasoMast, then the comparators.
+
+```{r groups}
+mep <- "megakaryocyte-erythroid progenitor cell"
+
+holdout_cells <- obs |>
+  filter(study == holdout_study) |>
+  inner_join(bmm, by = "cell_id") |>
+  mutate(
+    group = case_when(
+      true_broad == mep & bmm_label_broad == "EoBasoMast Precursor" ~ "MEP → EoBasoMast",
+      true_broad == mep & bmm_label_broad == "Megakaryocyte Precursor" ~ "MEP → Megakaryocyte Precursor",
+      true_broad == mep & bmm_label_broad == "MEP" ~ "MEP → MEP",
+      true_broad == mep ~ "MEP → other",
+      bmm_label_broad == "EoBasoMast Precursor" ~ "other → EoBasoMast",
+      true_broad == "erythroid lineage cell" ~ "erythroid lineage cell",
+      true_fine == "HSPC:HSC" ~ "HSPC:HSC",
+      true_broad == "granulocyte monocyte progenitor cell" ~ "GMP",
+      true_broad == "monocyte" ~ "monocyte",
+      TRUE ~ NA_character_
+    ),
+    panel = paste(holdout_study, assay)
+  ) |>
+  filter(!is.na(group))
+stopifnot(nrow(holdout_cells) > 0)
+
+# MEP cells from every other study, by donor disease status
+other_mep <- obs |>
+  filter(study != holdout_study, true_broad == mep) |>
+  mutate(
+    group = if_else(disease == "normal", "MEP, healthy donors", "MEP, AML donors"),
+    panel = "Atlas MEP, other studies"
+  )
+
+group_levels <- c(
+  "MEP → EoBasoMast", "MEP → Megakaryocyte Precursor", "MEP → MEP", "MEP → other",
+  "other → EoBasoMast", "erythroid lineage cell", "HSPC:HSC", "GMP", "monocyte",
+  "MEP, healthy donors", "MEP, AML donors"
+)
+
+all_groups <- bind_rows(holdout_cells, other_mep)
+```
+
+Cells per group before downsampling, and which other truth labels BoneMarrowMap calls EoBasoMast.
+
+```{r group-counts}
+all_groups |>
+  count(panel, group) |>
+  mutate(group = factor(group, levels = group_levels)) |>
+  arrange(panel, group) |>
+  knitr::kable()
+
+holdout_cells |>
+  filter(group == "other → EoBasoMast") |>
+  count(assay, true_fine, sort = TRUE) |>
+  knitr::kable()
+
+other_mep |>
+  count(group, study, assay) |>
+  knitr::kable()
+```
+
+Downsample to at most `r max_cells_per_group` cells per group and panel, so the large comparator
+groups don't dominate reading the file.
+
+```{r downsample}
+selected <- all_groups |>
+  group_by(panel, group) |>
+  slice_sample(n = max_cells_per_group) |>
+  ungroup()
+
+count(selected, panel, name = "n_selected") |> knitr::kable()
+```
+
+## Expression
+
+Counts for the selected cells, normalized as log1p of counts per 10,000 (library size from all
+genes), then subset to the marker genes.
+
+```{r expression}
+keep <- obs$cell_id %in% selected$cell_id
+sce <- adata[keep, ]$as_SingleCellExperiment(
+  x_mapping = "counts",
+  assays_mapping = FALSE,
+  colData_mapping = FALSE,
+  rowData_mapping = FALSE,
+  reducedDims_mapping = FALSE,
+  colPairs_mapping = FALSE,
+  rowPairs_mapping = FALSE,
+  metadata_mapping = FALSE
+)
+rm(adata)
+counts <- as(SummarizedExperiment::assay(sce, "counts"), "CsparseMatrix")
+rm(sce)
+
+lib_size <- Matrix::colSums(counts)
+marker_ids <- names(gene_symbols)[match(marker_sets$gene, gene_symbols)]
+marker_counts <- counts[marker_ids, , drop = FALSE]
+rm(counts)
+rownames(marker_counts) <- marker_sets$gene
+
+norm <- log1p(t(t(as.matrix(marker_counts)) / lib_size) * 1e4)
+
+expr <- as.data.frame(t(norm)) |>
+  mutate(cell_id = colnames(norm)) |>
+  tidyr::pivot_longer(-cell_id, names_to = "gene", values_to = "expr") |>
+  inner_join(selected |> select(cell_id, panel, group), by = "cell_id")
+
+stopifnot(n_distinct(expr$cell_id) == nrow(selected))
+```
+
+```{r summarize}
+dot_data <- expr |>
+  group_by(panel, group, gene) |>
+  summarize(mean_expr = mean(expr), frac_expr = mean(expr > 0), .groups = "drop") |>
+  # scale each gene's mean to its maximum across the groups in a panel
+  group_by(panel, gene) |>
+  mutate(scaled_mean = if (max(mean_expr) > 0) mean_expr / max(mean_expr) else 0) |>
+  ungroup() |>
+  left_join(marker_sets, by = "gene") |>
+  mutate(
+    gene = factor(gene, levels = marker_sets$gene),
+    group = factor(group, levels = rev(group_levels))
+  )
+```
+
+### Dot plot
+
+Color is each gene's mean expression scaled to its maximum within the panel, so compare colors
+across rows of the same gene, not across genes. Size is the fraction of cells with any counts.
+
+```{r dot-plot, fig.width = 15, fig.height = 9}
+ggplot(dot_data, aes(x = gene, y = group, color = scaled_mean, size = frac_expr)) +
+  geom_point() +
+  facet_grid(panel ~ marker_set, scales = "free", space = "free") +
+  scale_color_gradientn(colors = seq_blue, limits = c(0, 1), name = "Scaled mean") +
+  scale_size_area(max_size = 5, limits = c(0, 1), name = "Fraction expressing") +
+  labs(x = NULL, y = NULL, title = "Marker genes by group") +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1),
+    strip.text.y = element_text(angle = 0)
+  )
+```
+
+### Key genes
+
+The fraction of cells expressing a few key genes in each group, for reading exact values.
+
+```{r key-genes}
+key_genes <- c("HDC", "CPA3", "MS4A2", "TPSAB1", "CLC", "GATA2", "GATA1", "KLF1", "HBB", "CA1",
+               "PF4", "ITGA2B", "CD34")
+
+dot_data |>
+  filter(gene %in% key_genes) |>
+  mutate(gene = factor(gene, levels = key_genes), group = factor(group, levels = group_levels)) |>
+  select(panel, group, gene, frac_expr) |>
+  tidyr::pivot_wider(names_from = gene, values_from = frac_expr, names_sort = TRUE) |>
+  arrange(panel, group) |>
+  knitr::kable(digits = 2)
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
