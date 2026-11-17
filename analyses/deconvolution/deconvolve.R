@@ -137,7 +137,8 @@ option_list <- list(
     type = "double",
     default = 0.5,
     help = paste(
-      "Fail if fewer than this fraction of bulk genes match the reference",
+      "Fail if less than this fraction of the smaller gene set (bulk or",
+      "reference) is shared",
       "[default: %default]"
     )
   ),

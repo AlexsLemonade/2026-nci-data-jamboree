@@ -63,7 +63,7 @@ Use counts (e.g. salmon estimated counts), not TPM.
 **What happens:**
 
 1. Reference profiles are pooled across reference samples, and labels with fewer than `--min-cells` cells are dropped.
-2. Bulk genes are matched to the reference. The run warns if fewer than 80% of bulk genes match, and stops below `--min-gene-overlap` (default 0.5).
+2. Bulk genes are matched to the reference. Overlap is measured against the smaller of the two gene sets, so a filtered reference or bulk matrix is fine. The run warns if less than 80% of the smaller set is shared, and stops below `--min-gene-overlap` (default 0.5).
 3. Gene categories from `reference-files/gene_categories.tsv` are excluded: by default mitochondrial, ribosomal and sex-linked genes (`--exclude-gene-categories`; also available: `hemoglobin`, `non_coding`; `none` turns it off).
 4. The method runs, and the outputs and report are written.
 

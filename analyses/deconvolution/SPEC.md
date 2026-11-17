@@ -184,7 +184,7 @@ Pooled profiles per cell type or cell state are not stored. `deconvolve.R` compu
 | `--instaprism-filter` / `--no-instaprism-filter` | on | InstaPrism's outlier-gene filter |
 | `--exclude-gene-categories` | `mitochondrial,ribosomal,sex` | Categories from the gene category table to exclude; `none` disables |
 | `--gene-categories` | `reference-files/gene_categories.tsv` | Gene category table to use |
-| `--min-gene-overlap` | `0.5` | Fail if fewer than this fraction of bulk genes match the reference |
+| `--min-gene-overlap` | `0.5` | Fail if less than this fraction of the smaller gene set (bulk or reference) is shared |
 | `--n-markers` | `60` | Markers per label, for methods that need markers |
 | `--n-cores` | `1` | Passed to InstaPrism (`n.core`); does not change results |
 | `--seed` | `2026` | |
@@ -214,8 +214,9 @@ Options for one method only are explicit options named with that method's prefix
 - Match bulk IDs against the reference's `gene_id` (Ensembl) or `gene_symbol`, according to the detected bulk ID type.
 - When matching by symbol, **drop reference genes with an `NA` symbol** (about 20,000 in ScPCA), then sum duplicate reference symbols, with a warning.
 - Intersect reference and bulk genes, and report how many genes were lost.
-- Fail if the matched fraction of bulk genes is below `--min-gene-overlap`.
-- Warn if the matched fraction is below 0.8 (low gene overlap), so the report flags it.
+- Measure overlap as the shared fraction of the **smaller** gene set, bulk or reference. A filtered reference (e.g. an atlas that kept only detected genes) or a filtered bulk matrix (e.g. protein-coding only) then still passes, while mismatched IDs or species fail.
+- Fail if the overlap is below `--min-gene-overlap`.
+- Warn if the overlap is below 0.8 (low gene overlap), so the report flags it.
 - No other filtering happens here.
 
 **5. Exclude gene categories** (§8). This runs after intersection and before InstaPrism's `filter`, and applies whatever the method, including to marker selection.

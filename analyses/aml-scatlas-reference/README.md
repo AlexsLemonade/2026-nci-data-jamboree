@@ -54,5 +54,5 @@ Step 3 needs the deconvolution module's R environment (see its README).
 Building from all 199 reference samples took about 3 minutes, with a peak of about 10 GB of memory.
 The result has 21,588 genes, 16 cell types and 22 cell states, covering 744,176 cells.
 
-Because the source keeps only 21,588 genes, a typical bulk matrix of about 60k genes matches less than half of its genes to this reference.
-`deconvolve.R` currently stops when fewer than `--min-gene-overlap` (default 0.5) of the bulk genes match.
+The source keeps only 21,588 genes, so a typical bulk matrix of about 60k genes shares only about a third of its genes with this reference.
+That's fine: `deconvolve.R` measures overlap against the smaller gene set, here the reference's genes, and 99.7% of them are in Ensembl 104.
