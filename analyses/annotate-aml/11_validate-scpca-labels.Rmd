@@ -1,0 +1,479 @@
+---
+title: "Checking BoneMarrowMap labels on SCPCP000007"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: "JN Taroni"
+date: 2026
+---
+
+## Introduction
+
+BoneMarrowMap labeled every cell in the 26 AML libraries and the 2 healthy controls of
+SCPCP000007 (`09_predict-scpca-bonemarrowmap.R`). There's no truth, so this notebook checks the
+labels against evidence BoneMarrowMap didn't use:
+
+- **Protein (ADT, 21 targets)**, the main independent check, especially of HSPC *state*
+  (CD90, CD49f, CD45RA, CD133).
+- **RNA marker genes** for each label.
+- **ScPCA's consensus labels.**
+- **The healthy controls**, which should look like normal marrow.
+
+It starts with a specific concern from the mapping run. In the KMT2A-rearranged library
+(SCPCL000343), 76% of cells were labeled orthochromatic erythroblast with high mapping error,
+while ScPCA's consensus found no erythroid cells there. **Do off-reference or low-complexity
+cells default to late erythroblast labels?**
+
+See `.workspace/annotate-aml/scpcp000007.md` (step 3) for the plan.
+
+Conventions:
+
+- **Mapping QC uses one threshold across the project** (2.5 MADs above the median of all cells;
+  decision 3 in `bonemarrowmap.md`), not BoneMarrowMap's per-library flag.
+- **Pseudotime is set to NA for T, NK, plasma and stromal labels**, which sit outside the
+  reference's hierarchy (as in 06).
+- **ADT "positive"** means above the 95th percentile of the same target in a population that
+  shouldn't express it, taken from the healthy controls (see "ADT positivity thresholds"). It's a
+  heuristic for summarizing, not a gate.
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+
+root_dir <- rprojroot::find_root(rprojroot::has_dir(".git"))
+module_dir <- fs::path(root_dir, "analyses", "annotate-aml")
+scpca_results <- fs::path(module_dir, "results", "scpca")
+bmm_file <- fs::path(scpca_results, "bonemarrowmap", "bonemarrowmap_predictions_SCPCP000007.tsv")
+features_file <- fs::path(scpca_results, "features", "cell_features_SCPCP000007.tsv")
+metadata_file <- fs::path(root_dir, "data", "scpca", "SCPCP000007", "single_cell_metadata.tsv")
+
+stopifnot(fs::file_exists(bmm_file), fs::file_exists(features_file), fs::file_exists(metadata_file))
+
+# Plot style and plot_crosstab() shared with the evaluation reports
+source(fs::path(module_dir, "utils", "eval-helpers.R"))
+theme_set(eval_theme())
+
+mad_threshold <- 2.5
+# Labels outside the reference's pseudotime hierarchy (see 06)
+off_hierarchy_broad <- c("Naive T", "CD4 Memory T", "CD8 Memory T", "NK", "Plasma Cell", "Stromal")
+```
+
+## Load
+
+```{r load}
+bmm <- data.table::fread(bmm_file, data.table = FALSE)
+features <- data.table::fread(features_file, data.table = FALSE)
+stopifnot(setequal(bmm$cell_id, features$cell_id))
+
+sample_metadata <- data.table::fread(metadata_file, data.table = FALSE) |>
+  transmute(library_id = scpca_library_id, subdiagnosis, disease_timing)
+
+cells <- bmm |>
+  inner_join(features |> select(-library_id, -sample_id, -barcode), by = "cell_id") |>
+  left_join(sample_metadata, by = "library_id") |>
+  mutate(
+    role = factor(role, levels = c("healthy control", "AML")),
+    off_hierarchy = bmm_label_broad %in% off_hierarchy_broad,
+    bmm_pseudotime = if_else(off_hierarchy, NA_real_, bmm_pseudotime),
+    singlet = scDblFinder_class == "singlet"
+  )
+
+# Project-wide mapping QC
+qc_threshold <- median(cells$bmm_mapping_error) + mad_threshold * mad(cells$bmm_mapping_error)
+cells <- cells |> mutate(qc_pass = bmm_mapping_error < qc_threshold)
+
+stopifnot(nrow(cells) == nrow(bmm))
+qc_threshold
+count(cells, role, qc_pass) |> knitr::kable()
+count(cells, role, singlet) |> knitr::kable()
+
+adt_targets <- sub("^adt_", "", grep("^adt_", colnames(cells), value = TRUE))
+adt_targets <- setdiff(adt_targets, "scpca_filter")
+rna_genes <- sub("^rna_", "", grep("^rna_", colnames(cells), value = TRUE))
+adt_targets
+```
+
+Label order used throughout: hierarchy labels by median pseudotime across all cells, then
+off-hierarchy labels in a fixed order (T, NK, plasma, stromal).
+
+```{r label-order}
+order_labels <- function(cells, label_col) {
+  in_hierarchy <- cells |>
+    filter(!off_hierarchy) |>
+    group_by(label = .data[[label_col]]) |>
+    summarize(median_pt = median(bmm_pseudotime)) |>
+    arrange(median_pt, label) |>
+    pull(label)
+  off <- cells |>
+    filter(off_hierarchy) |>
+    mutate(group = match(bmm_label_broad, off_hierarchy_broad)) |>
+    distinct(label = .data[[label_col]], group) |>
+    arrange(group, label) |>
+    pull(label)
+  c(in_hierarchy, off)
+}
+fine_levels <- order_labels(cells, "bmm_label")
+broad_levels <- order_labels(cells, "bmm_label_broad")
+```
+
+## ADT positivity thresholds
+
+For each target, a population that shouldn't express it, from the healthy controls (cells
+passing QC, singlets). "Positive" means above that population's 95th percentile.
+
+- T cell targets (CD3, CD7, CD25, CD127, CD152, CD279) and CD45RA: CD14 monocytes.
+- CD45: late erythroid cells (erythroblasts are CD45-negative).
+- Everything else: T cells.
+
+```{r adt-thresholds}
+healthy <- cells |> filter(role == "healthy control", qc_pass, singlet)
+
+negative_population <- function(target) {
+  if (target %in% c("CD3", "CD7", "CD25", "CD127", "CD152", "CD279", "CD45RA")) {
+    healthy |> filter(bmm_label == "CD14 Mono")
+  } else if (target == "CD45") {
+    healthy |> filter(bmm_label_broad == "Late Erythroid")
+  } else {
+    healthy |> filter(bmm_label_broad %in% c("Naive T", "CD4 Memory T", "CD8 Memory T"))
+  }
+}
+
+adt_thresholds <- purrr::map(adt_targets, \(target) {
+  neg <- negative_population(target)
+  tibble::tibble(
+    target = target,
+    n_negative_cells = nrow(neg),
+    threshold = quantile(neg[[paste0("adt_", target)]], 0.95, na.rm = TRUE)
+  )
+}) |>
+  purrr::list_rbind()
+
+knitr::kable(adt_thresholds, digits = 2)
+
+# Logical "positive" columns, pos_<target>
+for (target in adt_targets) {
+  thr <- adt_thresholds$threshold[adt_thresholds$target == target]
+  cells[[paste0("pos_", target)]] <- cells[[paste0("adt_", target)]] > thr
+}
+```
+
+## Are late erythroid labels real?
+
+For cells BoneMarrowMap calls erythroid, check erythroid protein (CD235ab, glycophorin A/B;
+CD71, transferrin receptor), hemoglobin RNA, genes detected per cell, mapping error, and ScPCA's
+consensus label. Real late erythroblasts should be CD235ab+ with abundant hemoglobin.
+
+```{r erythroid-by-library}
+erythroid_summary <- cells |>
+  filter(bmm_label_broad %in% c("Early Erythroid", "Late Erythroid")) |>
+  group_by(role, library_id, subdiagnosis, bmm_label_broad) |>
+  summarize(
+    n_cells = n(),
+    frac_CD235ab_pos = mean(pos_CD235ab, na.rm = TRUE),
+    frac_CD71_pos = mean(pos_CD71, na.rm = TRUE),
+    frac_HBB_detected = mean(rna_HBB > 0),
+    median_genes_detected = median(detected),
+    median_mapping_error = median(bmm_mapping_error),
+    frac_qc_fail = mean(!qc_pass),
+    frac_consensus_erythroid = mean(grepl("erythr", consensus_celltype_annotation)),
+    .groups = "drop"
+  ) |>
+  arrange(bmm_label_broad, frac_CD235ab_pos)
+
+erythroid_summary |> knitr::kable(digits = 2)
+```
+
+```{r erythroid-plot, fig.width = 10, fig.height = 5}
+erythroid_summary |>
+  filter(n_cells >= 20) |>
+  ggplot(aes(x = median_genes_detected, y = frac_CD235ab_pos, size = n_cells, color = role)) +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~bmm_label_broad) +
+  scale_color_manual(values = c(`healthy control` = ink_secondary, AML = "#1baf7a"), name = NULL) +
+  scale_size_area(max_size = 6, name = "Cells") +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Median genes detected per cell", y = "Fraction CD235ab+",
+       title = "Erythroid-labeled cells by library",
+       subtitle = "Libraries with at least 20 cells in the label")
+```
+
+Within late erythroid calls, how do CD235ab-negative cells compare with CD235ab-positive ones?
+
+```{r erythroid-pos-vs-neg}
+cells |>
+  filter(bmm_label_broad == "Late Erythroid") |>
+  group_by(role, CD235ab = if_else(pos_CD235ab, "CD235ab+", "CD235ab-")) |>
+  summarize(
+    n_cells = n(),
+    median_genes_detected = median(detected),
+    median_umis = median(sum),
+    median_mapping_error = median(bmm_mapping_error),
+    frac_qc_fail = mean(!qc_pass),
+    frac_HBB_detected = mean(rna_HBB > 0),
+    median_knn_prob = median(bmm_label_prob),
+    .groups = "drop"
+  ) |>
+  knitr::kable(digits = 2)
+```
+
+What ScPCA's consensus calls the CD235ab-negative late erythroid cells, top labels:
+
+```{r erythroid-neg-consensus}
+cells |>
+  filter(bmm_label_broad == "Late Erythroid", !pos_CD235ab) |>
+  count(consensus_celltype_annotation, sort = TRUE) |>
+  mutate(share = n / sum(n)) |>
+  head(10) |>
+  knitr::kable(digits = 3)
+```
+
+## Protein by label
+
+Mean ADT value (color, scaled per target across both panels) and fraction positive (size) for
+each BoneMarrowMap fine label, in the healthy controls and in AML. Cells passing QC, singlets,
+labels with at least 20 such cells in a panel.
+
+```{r adt-dot-data}
+adt_long <- cells |>
+  filter(qc_pass, singlet) |>
+  select(role, bmm_label, starts_with("adt_"), starts_with("pos_")) |>
+  select(-any_of("adt_scpca_filter")) |>
+  tidyr::pivot_longer(
+    -c(role, bmm_label),
+    names_to = c(".value", "target"),
+    names_pattern = "^(adt|pos)_(.+)$"
+  )
+
+adt_dot <- adt_long |>
+  group_by(role, bmm_label, target) |>
+  summarize(n_cells = n(), mean_adt = mean(adt, na.rm = TRUE), frac_pos = mean(pos, na.rm = TRUE),
+            .groups = "drop") |>
+  filter(n_cells >= 20) |>
+  group_by(target) |>
+  mutate(scaled = (mean_adt - min(mean_adt)) / (max(mean_adt) - min(mean_adt))) |>
+  ungroup() |>
+  mutate(
+    bmm_label = factor(bmm_label, levels = rev(fine_levels)),
+    target = factor(target, levels = c(
+      "CD90", "CD49f", "CD133", "CD45RA", "CD123", "CD366", "CD33", "CD7",
+      "CD36", "CD32", "CD71", "CD235ab", "CD10", "CD19", "CD3", "CD25", "CD127", "CD152",
+      "CD279", "CD274", "CD45"
+    ))
+  )
+stopifnot(!anyNA(adt_dot$target))
+```
+
+```{r adt-dot-plot, fig.width = 14, fig.height = 16}
+ggplot(adt_dot, aes(x = target, y = bmm_label, color = scaled, size = frac_pos)) +
+  geom_point() +
+  facet_wrap(~role) +
+  scale_color_gradientn(colors = seq_blue, limits = c(0, 1), name = "Scaled mean") +
+  scale_size_area(max_size = 4.5, limits = c(0, 1), name = "Fraction positive") +
+  labs(x = NULL, y = "BoneMarrowMap label", title = "ADT by BoneMarrowMap label") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+### HSPC state
+
+Inside the HSPC compartment, the expected pattern in normal marrow is HSC/MPP CD90+ CD49f+
+CD45RA−, with CD45RA gained in LMPP/MLP and GMP. Distributions per label, healthy controls vs
+AML, for the HSPC targets and the LSC-associated targets (CD123, TIM-3/CD366).
+
+```{r hspc-state, fig.width = 13, fig.height = 9}
+hspc_labels <- c("HSC", "MPP-MkEry", "MPP-MyLy", "LMPP", "MLP", "MLP-II", "CLP",
+                 "Cycling Progenitor", "Early GMP", "GMP-Cycle", "GMP-Neut", "GMP-Mono",
+                 "MEP", "BFU-E", "EoBasoMast Precursor")
+
+hspc_long <- adt_long |>
+  filter(bmm_label %in% hspc_labels, target %in% c("CD90", "CD49f", "CD133", "CD45RA", "CD123",
+                                                   "CD366")) |>
+  add_count(role, bmm_label, target, name = "n_label") |>
+  filter(n_label >= 20) |>
+  mutate(
+    bmm_label = factor(bmm_label, levels = rev(intersect(fine_levels, hspc_labels))),
+    target = factor(target, levels = c("CD90", "CD49f", "CD133", "CD45RA", "CD123", "CD366"))
+  )
+
+ggplot(hspc_long, aes(x = adt, y = bmm_label, linetype = role)) +
+  geom_boxplot(color = "#1baf7a", fill = NA, outlier.size = 0.2, outlier.alpha = 0.2,
+               position = position_dodge(width = 0.8)) +
+  geom_vline(
+    data = adt_thresholds |> filter(target %in% levels(hspc_long$target)) |>
+      mutate(target = factor(target, levels = levels(hspc_long$target))),
+    aes(xintercept = threshold), linetype = "dashed", color = ink_muted
+  ) +
+  facet_wrap(~target, scales = "free_x", nrow = 1) +
+  scale_linetype_manual(values = c(`healthy control` = "dashed", AML = "solid"), name = NULL) +
+  labs(x = "ADT (logcounts)", y = NULL, title = "HSPC and LSC-associated protein by label",
+       subtitle = "Dashed vertical line: positivity threshold")
+```
+
+```{r hspc-state-table}
+adt_long |>
+  filter(bmm_label %in% hspc_labels, target %in% c("CD90", "CD49f", "CD133", "CD45RA", "CD123",
+                                                   "CD366")) |>
+  group_by(role, bmm_label, target) |>
+  summarize(n_cells = n(), frac_pos = mean(pos, na.rm = TRUE), .groups = "drop") |>
+  filter(n_cells >= 20) |>
+  tidyr::pivot_wider(names_from = target, values_from = frac_pos) |>
+  mutate(bmm_label = factor(bmm_label, levels = intersect(fine_levels, hspc_labels))) |>
+  arrange(role, bmm_label) |>
+  knitr::kable(digits = 2)
+```
+
+## RNA markers by label
+
+Mean log-normalized expression (color, scaled per gene across both panels) and fraction of
+cells with any expression (size), by BoneMarrowMap broad label. Cells passing QC, singlets,
+labels with at least 20 such cells in a panel.
+
+```{r rna-dot-plot, fig.width = 18, fig.height = 9}
+rna_dot <- cells |>
+  filter(qc_pass, singlet) |>
+  select(role, bmm_label_broad, starts_with("rna_")) |>
+  tidyr::pivot_longer(starts_with("rna_"), names_to = "gene", names_prefix = "rna_",
+                      values_to = "expr") |>
+  group_by(role, bmm_label_broad, gene) |>
+  summarize(n_cells = n(), mean_expr = mean(expr), frac_expr = mean(expr > 0), .groups = "drop") |>
+  filter(n_cells >= 20) |>
+  group_by(gene) |>
+  mutate(scaled = mean_expr / max(mean_expr)) |>
+  ungroup() |>
+  mutate(
+    bmm_label_broad = factor(bmm_label_broad, levels = rev(broad_levels)),
+    gene = factor(gene, levels = rna_genes)
+  )
+
+ggplot(rna_dot, aes(x = gene, y = bmm_label_broad, color = scaled, size = frac_expr)) +
+  geom_point() +
+  facet_wrap(~role, ncol = 1) +
+  scale_color_gradientn(colors = seq_blue, limits = c(0, 1), name = "Scaled mean") +
+  scale_size_area(max_size = 3.5, limits = c(0, 1), name = "Fraction expressing") +
+  labs(x = NULL, y = "BoneMarrowMap broad label", title = "Marker genes by BoneMarrowMap label") +
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, size = 7))
+```
+
+EoBasoMast calls need basophil/mast genes (`HDC`, `CPA3`, `MS4A2`), not just tryptase
+(`bonemarrowmap.md`, step 5):
+
+```{r eobasomast}
+cells |>
+  filter(bmm_label_broad == "EoBasoMast Precursor") |>
+  group_by(role) |>
+  summarize(
+    n_cells = n(),
+    across(c(rna_HDC, rna_CPA3, rna_MS4A2, rna_CLC, rna_TPSAB1, rna_CD34), \(x) mean(x > 0))
+  ) |>
+  knitr::kable(digits = 2)
+```
+
+## Comparison with ScPCA's consensus labels
+
+Rows are BoneMarrowMap broad labels, normalized to sum to 1. Columns are ScPCA's consensus
+labels (the 15 most common; the rest pooled as "other"). All cells.
+
+```{r consensus-crosstab, fig.width = 12, fig.height = 14}
+top_consensus <- cells |>
+  count(consensus_celltype_annotation, sort = TRUE) |>
+  head(15) |>
+  pull(consensus_celltype_annotation)
+
+consensus_df <- cells |>
+  transmute(
+    assay = as.character(role),
+    row = bmm_label_broad,
+    col = if_else(consensus_celltype_annotation %in% top_consensus,
+                  consensus_celltype_annotation, "other")
+  )
+
+plot_crosstab(
+  consensus_df,
+  title = "BoneMarrowMap broad label vs. ScPCA consensus label",
+  row_title = "BoneMarrowMap broad label",
+  col_title = "ScPCA consensus label",
+  row_levels = broad_levels,
+  col_levels = c(top_consensus, "other")
+)
+```
+
+## Composition by library
+
+Share of each library's cells in each BoneMarrowMap broad label, with the fraction failing
+project-wide QC. Libraries are grouped by role, then ordered by subdiagnosis.
+
+```{r composition, fig.width = 14, fig.height = 10}
+composition <- cells |>
+  count(role, library_id, subdiagnosis, bmm_label_broad) |>
+  group_by(library_id) |>
+  mutate(share = n / sum(n)) |>
+  ungroup()
+
+library_order <- cells |>
+  distinct(role, library_id, subdiagnosis) |>
+  arrange(role, subdiagnosis, library_id) |>
+  mutate(label = paste0(library_id, " (", substr(subdiagnosis, 1, 30), ")"))
+
+qc_by_library <- cells |>
+  group_by(library_id) |>
+  summarize(frac_qc_fail = mean(!qc_pass))
+
+composition |>
+  left_join(library_order |> select(library_id, label), by = "library_id") |>
+  mutate(
+    label = factor(label, levels = rev(library_order$label)),
+    bmm_label_broad = factor(bmm_label_broad, levels = broad_levels)
+  ) |>
+  ggplot(aes(x = bmm_label_broad, y = label, fill = share)) +
+  geom_tile(color = "#fcfcfb", linewidth = 0.4) +
+  geom_text(aes(label = ifelse(share >= 0.2, sprintf("%.2f", share), ""), color = share > 0.55),
+            size = 2.3, show.legend = FALSE) +
+  scale_fill_gradientn(colors = seq_blue, limits = c(0, 1), name = "Share of library") +
+  scale_color_manual(values = c(`FALSE` = ink_primary, `TRUE` = "#ffffff")) +
+  labs(x = "BoneMarrowMap broad label", y = NULL, title = "Composition by library") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), panel.grid = element_blank())
+```
+
+```{r qc-by-library}
+cells |>
+  group_by(role, library_id, subdiagnosis) |>
+  summarize(
+    n_cells = n(),
+    median_mapping_error = median(bmm_mapping_error),
+    frac_qc_fail = mean(!qc_pass),
+    median_genes_detected = median(detected),
+    .groups = "drop"
+  ) |>
+  arrange(desc(median_mapping_error)) |>
+  knitr::kable(digits = 3)
+```
+
+## Mapping error and transcriptional complexity
+
+Is mapping error related to how many genes a cell expresses? Spearman correlation by broad label,
+healthy controls vs AML (labels with at least 50 cells).
+
+```{r error-vs-complexity}
+cells |>
+  group_by(role, bmm_label_broad) |>
+  filter(n() >= 50) |>
+  summarize(
+    n_cells = n(),
+    median_genes_detected = median(detected),
+    median_mapping_error = median(bmm_mapping_error),
+    spearman_error_vs_detected = cor(bmm_mapping_error, detected, method = "spearman"),
+    .groups = "drop"
+  ) |>
+  arrange(bmm_label_broad, role) |>
+  knitr::kable(digits = 2)
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```

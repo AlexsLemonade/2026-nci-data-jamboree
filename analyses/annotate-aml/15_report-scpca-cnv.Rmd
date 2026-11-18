@@ -1,0 +1,386 @@
+---
+title: "Copy-number calls for SCPCP000007 from the lineage-matched inferCNV re-run"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: "JN Taroni"
+date: 2026
+---
+
+## Introduction
+
+ScPCA's own inferCNV used each sample's lymphoid cells as the reference. Lineage expression
+differences between myeloid cells and lymphocytes then read as CNVs (+12q, +1q, ±6p, ... in
+nearly every library), so those calls can't serve as malignancy evidence.
+`13_run-scpca-infercnv.R` re-ran inferCNV for the 26 AML libraries against a lineage-matched
+reference from the two healthy controls, plus two control runs (each healthy control against the
+other). `14_call-scpca-cnv.R` turned the per-arm scores into calls:
+
+- **z-scores:** per run and arm, relative to the run's reference cells.
+- **Altered arms:** the median z of the library's HSPC or myeloid cells is ≥ 1 in absolute value,
+  while its own T/NK cells stay flat (|median z| < 0.5, at least 20 T/NK cells). 19p counts only
+  if the HSPC cells are shifted too.
+- **Per-cell call:** `CNV+` if the cell's mean signed z over the library's altered arms is above
+  the 99th percentile of the reference cells. Otherwise `not detected` (not "normal"). Libraries
+  without altered arms are `uninformative`.
+
+This notebook checks whether those calls can be trusted and where they're weak:
+
+1. Are the control runs, and each AML library's own T/NK cells, flat?
+2. Which arms are altered, and do they fit each sample's subdiagnosis?
+3. Are some "altered" arms really broad noise?
+4. How well do the per-cell scores separate cells, and which cells are CNV+?
+5. Is the myeloid-only +19p shift an artifact?
+
+See `.workspace/annotate-aml/scpcp000007.md` (step 4) for the plan.
+
+## Setup
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+
+root_dir <- rprojroot::find_root(rprojroot::has_dir(".git"))
+module_dir <- fs::path(root_dir, "analyses", "annotate-aml")
+scpca_results <- fs::path(module_dir, "results", "scpca")
+cnv_dir <- fs::path(scpca_results, "infercnv-rerun")
+calls_file <- fs::path(cnv_dir, "cnv_calls_SCPCP000007.tsv")
+library_summary_file <- fs::path(cnv_dir, "cnv_library_summary.tsv")
+arm_summary_file <- fs::path(cnv_dir, "cnv_arm_group_summary.tsv")
+run_summary_file <- fs::path(cnv_dir, "run_summary.tsv")
+bmm_file <- fs::path(scpca_results, "bonemarrowmap", "bonemarrowmap_predictions_SCPCP000007.tsv")
+metadata_file <- fs::path(root_dir, "data", "scpca", "SCPCP000007", "single_cell_metadata.tsv")
+
+stopifnot(fs::file_exists(c(calls_file, library_summary_file, arm_summary_file, run_summary_file,
+                            bmm_file, metadata_file)))
+
+# Plot style shared with the evaluation reports
+source(fs::path(module_dir, "utils", "eval-helpers.R"))
+theme_set(eval_theme())
+
+# Same thresholds as 14_call-scpca-cnv.R
+min_group_cells <- 20
+noisy_z <- 2.5
+
+# Diverging blue (loss) <-> red (gain) with a gray midpoint, from the reference palette
+diverging <- c("#0d366b", "#3987e5", "#f0efec", "#e34948", "#8e1b1b")
+# Cell groups: reference in muted ink, query groups in categorical slots 1-5
+group_colors <- c(
+  reference = ink_muted, HSPC = "#2a78d6", myeloid = "#eb6834", erythroid_mk = "#eda100",
+  B = "#e87ba4", T_NK = "#1baf7a"
+)
+query_groups <- c("HSPC", "myeloid", "erythroid_mk", "B", "T_NK")
+```
+
+## Load
+
+```{r load}
+library_summary <- data.table::fread(library_summary_file, data.table = FALSE)
+arm_summary <- data.table::fread(arm_summary_file, data.table = FALSE)
+run_summary <- data.table::fread(run_summary_file, data.table = FALSE)
+calls <- data.table::fread(calls_file, data.table = FALSE)
+bmm <- data.table::fread(bmm_file, data.table = FALSE,
+                         select = c("cell_id", "bmm_label", "bmm_label_broad"))
+
+sample_metadata <- data.table::fread(metadata_file, data.table = FALSE) |>
+  transmute(query_library = scpca_library_id, subdiagnosis = coalesce(subdiagnosis, "NA"))
+
+library_summary <- library_summary |>
+  left_join(sample_metadata, by = "query_library") |>
+  left_join(run_summary |> select(run_id, n_genes_used), by = "run_id") |>
+  mutate(
+    run_label = paste0(run_id, " (", substr(subdiagnosis, 1, 28), ")"),
+    status_order = case_when(is_control_run ~ 1, library_status == "informative" ~ 2,
+                             library_status == "no T/NK check" ~ 3, TRUE ~ 4)
+  ) |>
+  arrange(status_order, subdiagnosis, run_id)
+run_levels <- library_summary$run_label
+
+# Arms in genomic order
+arm_levels <- arm_summary |>
+  distinct(arm) |>
+  mutate(chr = as.integer(sub("^chr(\\d+)[pq]$", "\\1", arm)), side = sub("^chr\\d+", "", arm)) |>
+  arrange(chr, side) |>
+  pull(arm)
+
+arm_summary <- arm_summary |>
+  mutate(
+    group_name = sub("^(query|reference)_", "", group),
+    arm_short = factor(sub("^chr", "", arm), levels = sub("^chr", "", arm_levels))
+  ) |>
+  left_join(library_summary |> select(run_id, run_label, library_status), by = "run_id") |>
+  mutate(run_label = factor(run_label, levels = rev(run_levels)))
+
+# Query cells only, with BoneMarrowMap labels; each query cell is in exactly one run
+query_calls <- calls |>
+  filter(!is_reference) |>
+  mutate(group_name = sub("^query_", "", group)) |>
+  left_join(bmm, by = "cell_id") |>
+  left_join(library_summary |> select(run_id, run_label, library_status, altered_arms),
+            by = "run_id")
+stopifnot(!anyDuplicated(query_calls$cell_id), !anyNA(query_calls$bmm_label))
+
+informative_runs <- library_summary$run_id[library_summary$library_status == "informative"]
+```
+
+## Runs
+
+One row per run: cells per group, genes inferCNV kept, and the resulting status. `max |T/NK z|`
+is the largest median z on any arm in the library's own T/NK cells. `n_noisy_arms` counts arm ×
+direction pairs with an excess of extreme cells (see "Broad noise" below).
+
+```{r run-table}
+library_summary |>
+  select(run_id, subdiagnosis, n_query, n_reference, n_HSPC, n_myeloid, n_T_NK, n_genes_used,
+         library_status, altered_arms, max_abs_T_NK_median_z, n_noisy_arms) |>
+  knitr::kable(digits = 2)
+```
+
+## Are the controls and T/NK cells flat?
+
+The largest |median z| on any arm, per run and cell group (groups with at least
+`r min_group_cells` cells). In the two control runs every group should be flat; in AML runs, the
+T/NK and B cells should be, unless they're part of the malignant clone.
+
+```{r flatness, fig.width = 10, fig.height = 8}
+flatness <- arm_summary |>
+  filter(!is_reference, n_cells >= min_group_cells, group_name %in% query_groups) |>
+  group_by(run_id, run_label, group_name) |>
+  summarize(max_abs_median_z = max(abs(median_z)), .groups = "drop") |>
+  mutate(group_name = factor(group_name, levels = query_groups))
+
+ggplot(flatness, aes(x = max_abs_median_z, y = run_label, color = group_name)) +
+  geom_vline(xintercept = c(0.5, 1), color = grid_color, linewidth = 0.6) +
+  geom_point(size = 2.6) +
+  scale_color_manual(values = group_colors, name = "Cell group") +
+  labs(x = "Largest |median z| on any arm", y = NULL,
+       title = "How far each cell group shifts from the reference",
+       subtitle = "Lines at 0.5 (T/NK limit) and 1 (altered-arm threshold)")
+```
+
+## Median shift per arm
+
+Median z per arm, library and cell group, clipped to ±3. Outlined tiles are the arms called
+altered for that library. Groups with fewer than `r min_group_cells` cells are left blank.
+
+```{r arm-heatmap, fig.width = 16, fig.height = 10}
+arm_summary |>
+  filter(!is_reference, group_name %in% c("HSPC", "myeloid", "T_NK")) |>
+  mutate(
+    median_z = if_else(n_cells >= min_group_cells, pmax(pmin(median_z, 3), -3), NA_real_),
+    group_name = factor(group_name, levels = c("HSPC", "myeloid", "T_NK"))
+  ) |>
+  ggplot(aes(x = arm_short, y = run_label, fill = median_z)) +
+  geom_tile(color = "#fcfcfb", linewidth = 0.3) +
+  geom_tile(data = \(d) filter(d, altered, group_name != "T_NK"), fill = NA,
+            color = ink_primary, linewidth = 0.6) +
+  facet_wrap(~group_name, nrow = 1) +
+  scale_fill_gradientn(colors = diverging, limits = c(-3, 3), na.value = "#ffffff",
+                       name = "Median z (loss < 0 < gain)") +
+  labs(x = "Arm", y = NULL, title = "Median arm shift vs the healthy-control reference") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, size = 6),
+        panel.grid = element_blank())
+```
+
+## Altered arms and subdiagnosis
+
+Background for checking these against the subdiagnoses:
+
+- Trisomy 8 is the most common numerical change in AML and occurs alongside many subtypes.
+- −7/del(7q) is a recurrent adverse-risk change.
+- +22 is a classic secondary change in inv(16) AML.
+- A "normal karyotype" sample shouldn't have arm-level changes.
+
+There's no karyotype in the metadata beyond the subdiagnosis, so none of these can be confirmed
+here.
+
+```{r altered-table}
+library_summary |>
+  filter(library_status == "informative") |>
+  select(run_id, subdiagnosis, altered_arms, n_noisy_arms, cnv_threshold, frac_cnv_HSPC,
+         frac_cnv_myeloid, frac_cnv_erythroid_mk, frac_cnv_B, frac_cnv_T_NK) |>
+  knitr::kable(digits = 2)
+```
+
+The median z on each altered arm, by group:
+
+```{r altered-arm-detail}
+altered_detail <- arm_summary |>
+  filter(altered, !is_reference, n_cells >= min_group_cells) |>
+  select(run_id, arm, group_name, n_cells, median_z, frac_gain, frac_loss)
+altered_detail |>
+  tidyr::pivot_wider(id_cols = c(run_id, arm), names_from = group_name,
+                     values_from = median_z) |>
+  knitr::kable(digits = 2)
+```
+
+## Broad noise
+
+A real karyotype changes a few arms in one direction. A library whose HSPC or myeloid cells have
+an excess of extreme cells on many arms, in both directions, is more likely to have noisy cells
+(low quality, or a cell state far from any reference lineage).
+
+For each library, the excess over the reference cells in the fraction of cells with z > 2.5 (gain)
+or z < −2.5 (loss), per arm, in HSPC cells. Libraries with at least one altered arm are shown.
+
+```{r noisy-arms, fig.width = 14, fig.height = 9}
+reference_fraction <- arm_summary |>
+  filter(is_reference) |>
+  group_by(run_id, arm) |>
+  summarize(ref_gain = weighted.mean(frac_gain, n_cells),
+            ref_loss = weighted.mean(frac_loss, n_cells), .groups = "drop")
+
+arm_summary |>
+  filter(run_id %in% informative_runs, group_name == "HSPC", n_cells >= min_group_cells) |>
+  left_join(reference_fraction, by = c("run_id", "arm")) |>
+  transmute(run_label, arm_short, gain = frac_gain - ref_gain, loss = -(frac_loss - ref_loss)) |>
+  tidyr::pivot_longer(c(gain, loss), names_to = "direction", values_to = "excess") |>
+  ggplot(aes(x = arm_short, y = excess, fill = direction)) +
+  geom_hline(yintercept = 0, color = ink_muted, linewidth = 0.4) +
+  geom_hline(yintercept = c(-0.15, 0.15), color = grid_color, linewidth = 0.6) +
+  geom_col(width = 0.7) +
+  facet_wrap(~run_label, ncol = 2) +
+  scale_fill_manual(values = c(gain = diverging[4], loss = diverging[2]), name = NULL) +
+  labs(x = "Arm", y = "Excess fraction of extreme cells (loss plotted below 0)",
+       title = "HSPC cells: excess of extreme arm scores over the reference",
+       subtitle = "Lines at ±0.15, the threshold used for n_noisy_arms") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, size = 6))
+```
+
+Are the noisy libraries' HSPC cells lower quality? The overall `cnv_score` (mean squared
+residual over all genes) per group:
+
+```{r cnv-score-by-group}
+query_calls |>
+  filter(run_id %in% informative_runs) |>
+  group_by(run_id, group_name) |>
+  filter(n() >= min_group_cells) |>
+  summarize(n_cells = n(), median_cnv_score = median(cnv_score), .groups = "drop") |>
+  tidyr::pivot_wider(id_cols = run_id, names_from = group_name, values_from = median_cnv_score) |>
+  left_join(library_summary |> select(run_id, n_noisy_arms), by = "run_id") |>
+  knitr::kable(digits = 5)
+```
+
+## Per-cell scores
+
+Distribution of the per-cell score (mean signed z over the library's altered arms) by group, with
+the CNV+ threshold (99th percentile of the reference cells). A clonal change should show as a
+query distribution shifted, or split, above the reference.
+
+```{r score-distributions, fig.width = 14, fig.height = 10}
+calls |>
+  filter(run_id %in% informative_runs) |>
+  mutate(group_name = if_else(is_reference, "reference", sub("^query_", "", group))) |>
+  filter(group_name %in% c("reference", "HSPC", "myeloid", "T_NK")) |>
+  group_by(run_id, group_name) |>
+  filter(n() >= min_group_cells) |>
+  ungroup() |>
+  left_join(library_summary |> select(run_id, run_label, altered_arms), by = "run_id") |>
+  mutate(
+    panel = paste0(run_label, ": ", altered_arms),
+    group_name = factor(group_name, levels = c("reference", "HSPC", "myeloid", "T_NK"))
+  ) |>
+  ggplot(aes(x = cnv_arm_score, color = group_name)) +
+  geom_density(linewidth = 0.7) +
+  geom_vline(aes(xintercept = cnv_threshold), color = ink_primary, linetype = "dashed",
+             linewidth = 0.4) +
+  facet_wrap(~panel, ncol = 2, scales = "free") +
+  scale_color_manual(values = group_colors, name = "Cell group") +
+  labs(x = "Score on the library's altered arms (mean signed z)", y = "Density",
+       title = "Per-cell scores vs the CNV+ threshold")
+```
+
+### CNV+ rate by group
+
+The T/NK rate is the false-positive check: the threshold allows ~1% of reference cells, so T/NK
+cells should be near 1% unless some of them are in the clone.
+
+```{r cnv-rate, fig.width = 10, fig.height = 5}
+query_calls |>
+  filter(run_id %in% informative_runs, group_name %in% query_groups) |>
+  group_by(run_label, group_name) |>
+  filter(n() >= min_group_cells) |>
+  summarize(n_cells = n(), frac_cnv = mean(cnv_call == "CNV+"), .groups = "drop") |>
+  mutate(group_name = factor(group_name, levels = query_groups)) |>
+  ggplot(aes(x = frac_cnv, y = run_label, color = group_name)) +
+  geom_vline(xintercept = 0.01, color = grid_color, linewidth = 0.6) +
+  geom_point(size = 2.6) +
+  scale_color_manual(values = group_colors, name = "Cell group") +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x = "Fraction CNV+", y = NULL, title = "CNV+ rate by cell group",
+       subtitle = "Groups with at least 20 cells; line at the 1% expected for normal cells")
+```
+
+### CNV+ rate by BoneMarrowMap label
+
+Which labels carry the clone, in the informative libraries? Labels with at least
+`r min_group_cells` cells in a library.
+
+```{r cnv-by-label, fig.width = 14, fig.height = 6}
+label_rates <- query_calls |>
+  filter(run_id %in% informative_runs) |>
+  group_by(run_label, group_name, bmm_label) |>
+  summarize(n_cells = n(), frac_cnv = mean(cnv_call == "CNV+"), .groups = "drop") |>
+  filter(n_cells >= min_group_cells)
+
+label_levels <- label_rates |>
+  mutate(group_order = match(group_name, c(query_groups, "other"))) |>
+  distinct(bmm_label, group_order) |>
+  arrange(group_order, bmm_label) |>
+  pull(bmm_label) |>
+  unique()
+
+label_rates |>
+  mutate(bmm_label = factor(bmm_label, levels = label_levels)) |>
+  ggplot(aes(x = bmm_label, y = run_label, fill = frac_cnv)) +
+  geom_tile(color = "#fcfcfb", linewidth = 0.4) +
+  geom_text(aes(label = sprintf("%.2f", frac_cnv), color = frac_cnv > 0.55), size = 2.3,
+            show.legend = FALSE) +
+  scale_fill_gradientn(colors = seq_blue, limits = c(0, 1), name = "Fraction CNV+") +
+  scale_color_manual(values = c(`FALSE` = ink_primary, `TRUE` = "#ffffff")) +
+  labs(x = "BoneMarrowMap label (ordered by lineage group)", y = NULL,
+       title = "CNV+ rate by BoneMarrowMap label") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), panel.grid = element_blank())
+```
+
+## Is the myeloid +19p shift an artifact?
+
+The median 19p z in HSPC vs myeloid cells for every AML library. A real gain should show in
+both groups (or in whichever carries the clone). A shift in myeloid cells only, seen across many
+subtypes, points to a maturation-state difference from the healthy myeloid reference.
+
+```{r chr19p, fig.width = 10, fig.height = 8}
+arm_summary |>
+  filter(arm == "chr19p", !is_reference, group_name %in% c("HSPC", "myeloid", "T_NK"),
+         n_cells >= min_group_cells) |>
+  mutate(group_name = factor(group_name, levels = c("HSPC", "myeloid", "T_NK"))) |>
+  ggplot(aes(x = median_z, y = run_label, color = group_name)) +
+  geom_vline(xintercept = 0, color = ink_muted, linewidth = 0.4) +
+  geom_vline(xintercept = 1, color = grid_color, linewidth = 0.6) +
+  geom_point(size = 2.6) +
+  scale_color_manual(values = group_colors, name = "Cell group") +
+  labs(x = "Median z on 19p", y = NULL, title = "19p shift by cell group")
+```
+
+## For discussion
+
+Questions the calls leave open, for the human to decide before the protein-aberrancy step:
+
+1. **SCPCL000299 and SCPCL000365.** Do their altered arms count, given the noise check above
+   (and, for 299, a "normal karyotype" subdiagnosis)?
+2. **SCPCL000343 (KMT2A-r)** has too few T/NK cells to check arms against. Leave it
+   `uninformative`?
+3. **Sensitivity.** With one or two altered arms per cell, many cells in informative libraries are
+   `not detected`. For the protein-aberrancy check, should the CNV− comparison set be the
+   library's T/NK/B cells (known normal) rather than `not detected` cells?
+4. **Non-HSPC/myeloid CNV+ cells** (erythroid, B; see the label table). Real clonal involvement
+   or blasts mislabeled by BoneMarrowMap?
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
